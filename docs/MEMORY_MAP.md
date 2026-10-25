@@ -1,0 +1,229 @@
+# UFO50 Pocket SoC: memory map and peripheral contract (M3)
+
+Status: **draft v0.1** (2026-10-25), branch `ufo50-m3`. This file is the contract between the SoC
+(CPU, SDRAM, video, data slots: branch `ufo50-m3`), the blitter and audio mixer (branch `ufo50-periph`)
+and the runtime port (`platform_pocket.c`). Changes to the port definitions in sections 4 and 5 are
+listed in the changelog at the end.
+
+## 1. Clocks and resets
+
+| Clock | Frequency | Used by |
+|---|---|---|
+| `clk_sys` | **57.75 MHz** (74.25 MHz x 14 / 18, integer-mode PLL) | CPU, Wishbone bus, SDRAM controller, all MMIO slaves, blitter, mixer |
+| `clk_sdram` | 57.75 MHz, phase shifted | `dram_clk` pin only |
+| `clk_vid` | 12.288 MHz (template PLL) | video timing (`ufo50_video`), scanout line buffer read side |
+| `clk_74a` | 74.25 MHz | APF bridge, data-slot command FSM |
+
+Everything a peripheral sees (Wishbone slave port, SDRAM master port, IRQ line, audio strobe) is
+**synchronous to `clk_sys`**. Reset for peripherals: `rst_sys` (active high, synchronous to `clk_sys`),
+asserted while the PLL is unlocked or the APF holds the core in reset (`reset_n` low).
+The SDRAM controller and the bridge-to-SDRAM path are **not** held in reset by `reset_n`: the APF writes
+data slots into SDRAM before it releases reset.
+
+## 2. CPU-visible address map
+
+| Range | Size | Region | Cached | Notes |
+|---|---|---|---|---|
+| `0x0000_0000 - 0x0000_7FFF` | 32 KB | Boot RAM (M10K) | yes (I$, D$) | Firmware image, preloaded from the bitstream (`.hex`/`.mif`). Writable. Reset vector `0x0000_0000`. |
+| `0x1000_0000 - 0x13FF_FFFF` | 64 MB | SDRAM | yes | Main memory. Code, data, heap, framebuffers, data slots. |
+| `0x5000_0000 - 0x53FF_FFFF` | 64 MB | SDRAM, uncached alias | no | Same memory as `0x1000_0000`. Use for buffers written by DMA/blitter, or invalidate the D$ first. |
+| `0x8000_0000 - 0x8000_FFFF` | 64 KB | System registers | no | Section 3.1 |
+| `0x8001_0000 - 0x8001_FFFF` | 64 KB | Data-slot controller | no | Section 3.2 |
+| `0x8002_0000 - 0x8002_FFFF` | 64 KB | **Blitter** (Wishbone slave) | no | Section 4. Stub in M3: test registers |
+| `0x8003_0000 - 0x8003_FFFF` | 64 KB | **Audio mixer** (Wishbone slave) | no | Section 4. Stub in M3: test registers |
+| `0x8004_0000 - 0x8FFF_FFFF` | | reserved (reads 0, writes ignored, acked) | no | |
+| everything else | | unmapped (reads `0xDEAD_BEEF`, acked) | | |
+
+The CPU treats `0x5xxx_xxxx` and `0x8xxx_xxxx` as I/O (uncached, no speculation). The D$ is
+**write-through**: CPU stores reach SDRAM immediately, so hardware readers (video scanout, blitter)
+see them without a flush. When hardware writes SDRAM that the CPU will read through the cached window
+(data-slot DMA, blitter readback), the CPU must invalidate the D$ (`dcache_invalidate()` in
+`firmware/common/soc.h`) or read through the uncached alias.
+
+### Bridge (APF) address map
+
+Bridge writes in `0x1000_0000 - 0x13FF_FFFF` go to SDRAM (same addresses as the CPU's cached window).
+That is what the `address` fields of `data.json` and the `bridge address` parameter of target command
+`0x0180` refer to. `0xF8xx_xxxx` is the APF command space. Bridge reads of SDRAM are not supported in M3
+(return 0), so savestates / data-slot writes (0x0184) are a later milestone.
+
+### Default SDRAM layout (firmware/runtime convention, not hardware)
+
+| CPU address | Size | Use |
+|---|---|---|
+| `0x1000_0000` | 40 MB | Slot 0 `ufo50.gmp` (loaded by APF at boot) |
+| `0x1280_0000` | 8 MB | Slot 1 `ufo50.gma` (loaded by APF at boot) |
+| `0x1300_0000` | 1 MB | Slot 4 `english.txt` (loaded by APF at boot) |
+| `0x1310_0000` | ~14.4 MB | Heap / runtime `.bss` / deferload staging (runtime's choice) |
+| `0x13F0_0000` | 512 KB | Reserved (blitter display lists, audio ring) |
+| `0x13F8_0000` | 256 KB | Framebuffer 0 |
+| `0x13FC_0000` | 256 KB | Framebuffer 1 |
+
+Note for the runtime team: 64 MB cannot hold the measured 70 MB resident heap; the `.gmp` has to be used
+in place (no copy) and/or per game overlays. The 2 x 16 MB PSRAM is not mapped in M3 (planned for 8 bpp
+texture pages, M4).
+
+### IRQs
+
+VexRiscv machine-mode interrupts:
+- **Timer** (`mip.MTIP`): `MTIME >= MTIMECMP` (system registers).
+- **External** (`mip.MEIP`): `|(IRQ_PENDING & IRQ_ENABLE)`. Sources:
+
+| Bit | Source | Pending set by | Cleared by |
+|---|---|---|---|
+| 0 | VBLANK | start of vertical blank (after the last active line) | write 1 to `IRQ_PENDING` bit 0 |
+| 1 | SLOT | data-slot command finished | write 1 to bit 1 |
+| 2 | BLIT | blitter `irq` output (level) | the blitter (level-sensitive, mirrored) |
+| 3 | AUDIO | mixer `irq` output (level) | the mixer (level-sensitive, mirrored) |
+| 4 | BUTTON | any change of `cont1_key[15:0]` | write 1 to bit 4 |
+
+The firmware in M3 polls; IRQs are wired and testable but not required.
+
+## 3. MMIO registers
+
+All registers are 32-bit, word aligned. Byte/half writes to registers are treated as full writes of the
+selected lanes (sel). Undefined offsets read 0.
+
+### 3.1 System registers, base `0x8000_0000`
+
+| Offset | Name | R/W | Description |
+|---|---|---|---|
+| `0x000` | `SYS_ID` | R | `0x5546_3530` ("UF50") |
+| `0x004` | `SYS_VERSION` | R | `0x0003_0000` (M3, major.minor) |
+| `0x008` | `SYS_CLK_HZ` | R | `clk_sys` frequency in Hz (57,750,000) |
+| `0x00C` | `SYS_CONFIG` | R | `[7:0]` I$ KB, `[15:8]` D$ KB, `[19:16]` I$ ways, `[23:20]` D$ ways, `[24]` FPU-D present, `[25]` blitter present (0 = stub), `[26]` mixer present (0 = stub) |
+| `0x010` | `MTIME_LO` | R | 64-bit free-running `clk_sys` counter, low word (read LO first; HI is latched on LO read) |
+| `0x014` | `MTIME_HI` | R | high word |
+| `0x018` | `MTIMECMP_LO` | RW | timer compare, low (reset all ones) |
+| `0x01C` | `MTIMECMP_HI` | RW | timer compare, high |
+| `0x020` | `IRQ_PENDING` | R/W1C | Section 2, IRQs |
+| `0x024` | `IRQ_ENABLE` | RW | same bit layout |
+| `0x030` | `CONT1_KEY` | R | `cont1_key` (bit map in `core_top.v`: 0 up, 1 down, 2 left, 3 right, 4 A, 5 B, 6 X, 7 Y, 8 L1, 9 R1, 10 L2, 11 R2, 12 L3, 13 R3, 14 select, 15 start, 31:28 type) |
+| `0x034` | `CONT1_JOY` | R | `cont1_joy` |
+| `0x038` | `CONT1_TRIG` | R | `cont1_trig` |
+| `0x03C` | `CONT2_KEY` | R | `cont2_key` (and `0x040`..`0x05C`: CONT2_JOY, CONT2_TRIG, CONT3_KEY, ... same stride pattern: KEY, JOY, TRIG per controller) |
+| `0x060` | `RTC_EPOCH` | R | `rtc_epoch_seconds` from the APF (valid when `RTC_VALID`=1) |
+| `0x064` | `RTC_VALID` | R | bit 0 |
+| `0x070` | `OS_STATUS` | R | bit 0 `osnotify_inmenu` (Pocket menu open), bit 1 `dataslot_allcomplete` |
+| `0x100` | `VID_STATUS` | R | bit 0 in vblank, bit 1 = buffer swap pending, `[25:16]` current line (0..399, 16 = first active) |
+| `0x104` | `VID_FRAME` | R | frame counter, +1 at each vblank start |
+| `0x108` | `FB_ADDR` | RW | Address of the **front buffer** (CPU byte address in `0x1000_0000`+, 256-byte aligned). The written value takes effect at the next vblank start (`VID_STATUS` bit 1 is set until then). Reset `0x13F8_0000`. |
+| `0x10C` | `FB_ACTIVE` | R | address currently scanned out |
+| `0x110` | `VID_CTRL` | RW | bit 0 scanout enable (0 = output black; reset 0, firmware sets 1 after clearing the buffer), bit 1 test pattern (M1 pattern instead of the framebuffer) |
+| `0x114` | `VID_BORDER` | RW | RGB888 colour output when scanout is disabled |
+
+### 3.2 Data-slot controller, base `0x8001_0000`
+
+Wraps APF target command `0x0180` (data slot read) and the data-slot size table. C driver:
+`firmware/common/dataslot.c`.
+
+| Offset | Name | R/W | Description |
+|---|---|---|---|
+| `0x00` | `DS_SLOT_ID` | RW | slot id (16 bits) |
+| `0x04` | `DS_OFFSET` | RW | byte offset inside the slot file |
+| `0x08` | `DS_ADDR` | RW | destination: CPU address in `0x1000_0000 - 0x13FF_FFFF` (bridge address) |
+| `0x0C` | `DS_LENGTH` | RW | bytes |
+| `0x10` | `DS_CMD` | W | write 1 = start read (0x0180). Ignored while busy |
+| `0x14` | `DS_STATUS` | R | bit 0 busy, bit 1 done (sticky until next start), bit 2 error, `[10:8]` APF error code (`target_dataslot_err`), bit 16 `dataslot_allcomplete` |
+| `0x100 - 0x1FC` | `DS_TABLE[64]` | R | the APF data-slot size table (bridge `0xF800_2000`): word `2n` = slot id of entry n, word `2n+1` = size in bytes. Reads stall ~10 bus cycles (clock crossing) |
+
+The APF writes the data through the bridge into SDRAM; the driver waits for `done`, then the CPU must
+**invalidate the D$** (or read through `0x5xxx_xxxx`) before reading the destination.
+Lengths and offsets: any multiple of 4 is safe; the APF handles the rest.
+
+## 4. Peripheral slave windows (blitter, mixer): Wishbone B4 classic, 32-bit
+
+One port per peripheral, in `clk_sys`. The SoC decodes the 64 KB window and drives:
+
+```verilog
+// SoC -> peripheral
+input  wire        clk,          // clk_sys
+input  wire        rst,          // rst_sys, active high, synchronous
+input  wire [15:2] wb_adr,       // word address inside the 64 KB window
+input  wire [31:0] wb_dat_w,
+input  wire [3:0]  wb_sel,       // byte lanes, little endian (sel[0] = bits 7:0)
+input  wire        wb_we,
+input  wire        wb_cyc,
+input  wire        wb_stb,       // cyc & stb = request; held until ack
+// peripheral -> SoC
+output wire [31:0] wb_dat_r,     // valid in the ack cycle
+output wire        wb_ack,       // one cycle per transfer; may be delayed (wait states allowed)
+output wire        irq           // level, high = interrupt pending (IRQ bits 2 / 3)
+```
+
+Rules: classic single transfers only (no `cti`/`bte`, no `err`/`rty`). The SoC keeps `cyc`/`stb` and all
+inputs stable until `ack`, then drops `stb` for at least one cycle. `ack` must be asserted only while
+`cyc & stb`. Latency should stay below 256 cycles; the CPU stalls meanwhile.
+
+The audio mixer additionally gets:
+
+```verilog
+input  wire        audio_tick,   // one-cycle pulse in clk_sys at 48,000 Hz (sample request)
+output wire [15:0] audio_l,      // signed PCM, sampled by the SoC on audio_tick
+output wire [15:0] audio_r
+```
+
+The SoC serialises `audio_l/r` to I2S (48 kHz, 16-bit, the APF's audio format).
+
+M3 stubs (`rtl/periph_stub.v`): offset `0x0` reads an ID (`0x424C_4954` "BLIT" / `0x4D49_5852` "MIXR"),
+offsets `0x4..0x1C` are 7 scratch registers (RW), `0x20` write = start a 32-byte SDRAM copy test through
+the master port (src at `0x24`, dst at `0x28`; `0x20` reads 1 while busy), irq = 0, audio = 0.
+
+## 5. SDRAM master ports (blitter `X0`, mixer `X1`)
+
+Two identical extra masters on the SDRAM arbiter, in `clk_sys`:
+
+```verilog
+// master -> arbiter
+output wire        mem_cmd_valid,
+output wire        mem_cmd_we,       // 1 = write
+output wire [25:2] mem_cmd_addr,     // SDRAM word address: (CPU address - 0x1000_0000) >> 2
+output wire [2:0]  mem_cmd_len,      // beats - 1 (1..8 beats of 32 bits)
+output wire [31:0] mem_wdata,        // current write beat
+output wire [3:0]  mem_wstrb,        // byte enables of the current write beat
+// arbiter -> master
+input  wire        mem_cmd_ready,    // command accepted when valid & ready
+input  wire        mem_wready,       // write beat consumed (one pulse per beat)
+input  wire [31:0] mem_rdata,
+input  wire        mem_rvalid        // read beat (one pulse per beat, in order)
+```
+
+Protocol:
+- **Burst limits**: a burst must not cross an aligned **32-byte** boundary (`addr[4:2] + len <= 7`).
+- **Command**: the master holds `valid`, `we`, `addr`, `len` until `ready`. `ready` may come many cycles
+  later (arbitration, refresh). The command is accepted in the cycle with `valid & ready`.
+- **Write data** is pulled: beat 0 must be on `wdata/wstrb` when the command is presented. The arbiter
+  pulses `wready` once per beat (beat 0 at the earliest in the acceptance cycle); after each `wready`, the
+  master puts the next beat on `wdata/wstrb` in the **next** cycle. Beats can be consecutive-cycle pulls,
+  so a master should keep the burst in a small FIFO/register file and index it with a beat counter.
+  `wstrb = 0` is allowed (beat skipped in memory).
+- **Read data**: `len+1` `rvalid` pulses in address order, no backpressure (the master must accept).
+- **One outstanding command per port**: after acceptance, the next command is accepted only after the
+  last `wready` (write) or the last `rvalid` (read). Holding `valid` early is fine.
+- Typical cost: a closed-page access is ~8 `clk_sys` cycles + 2 per beat; 8 beats (32 B) ~ 24 cycles.
+- Arbitration (fixed priority, may be tuned; not part of the contract): video scanout > bridge (APF) >
+  `X1` mixer > CPU D-bus > CPU I-bus > `X0` blitter. A master must not assume a bound on `ready`
+  latency, but video takes at most ~10% of SDRAM time and a CPU burst is <= 32 B.
+- Peak bandwidth: 16-bit SDR at 57.75 MHz = 115 MB/s raw; ~75-90 MB/s for 32-byte bursts.
+
+## 6. Framebuffer format
+
+- 384 x 216 pixels, **RGB565**, little-endian 16-bit (`pixel = r5<<11 | g6<<5 | b5`), pixel (x, y) at
+  `FB_ADDR + y*768 + x*2`. Stride 768 bytes, size 165,888 bytes. Two pixels per 32-bit word: the
+  left pixel in bits 15:0.
+- Scanout expands to RGB888 by bit replication. It prefetches each line during the previous line
+  (512-clock lines at 12.288 MHz), so frame timing is exactly the M1 timing (60.000 Hz).
+- Double buffering: draw into the back buffer, write its address to `FB_ADDR`, then wait until
+  `VID_STATUS` bit 1 clears (or the VBLANK IRQ) before drawing into the old front buffer.
+- Vertical blank is 184 of 400 lines (46% of the frame, ~7.7 ms).
+
+## 7. CPU configuration
+
+VexRiscv (SpinalHDL, MIT), single core, RV32IMFD (+Zicsr), ilp32d, machine mode only. See
+`rtl/cpu/README.md` for the exact generator configuration, cache sizes and how to regenerate.
+Toolchain flags: `-march=rv32imfd_zicsr_zifencei -mabi=ilp32d`.
+`rdcycle`/`rdcycleh`, `rdinstret` work. D$ invalidate: `dcache_invalidate()`; I$ invalidate: `fence.i`.
+
+## Changelog
+
+- v0.1 (2026-10-25): first draft.
