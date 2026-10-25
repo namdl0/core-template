@@ -506,6 +506,13 @@ core_bridge_cmd icb (
 // The PLL is unchanged from the template, so no IP regeneration is needed.
 //
 
+    wire [23:0] vidout_rgb;
+    wire        vidout_de;
+    wire        vidout_skip;
+    wire        vidout_vs;
+    wire        vidout_hs;
+    wire [15:0] frame_count;
+
 assign video_rgb_clock = clk_core_12288;
 assign video_rgb_clock_90 = clk_core_12288_90deg;
 assign video_rgb = vidout_rgb;
@@ -513,13 +520,6 @@ assign video_de = vidout_de;
 assign video_skip = vidout_skip;
 assign video_vs = vidout_vs;
 assign video_hs = vidout_hs;
-
-    wire [23:0] vidout_rgb;
-    wire        vidout_de;
-    wire        vidout_skip;
-    wire        vidout_vs;
-    wire        vidout_hs;
-    wire [15:0] frame_count;
 
 ufo50_video #(
     .H_ACTIVE   ( 384 ),
