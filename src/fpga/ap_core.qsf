@@ -749,7 +749,12 @@ set_global_assignment -name VERILOG_FILE core/soc/sdram_arb.v
 set_global_assignment -name VERILOG_FILE core/soc/vid_scanout.v
 set_global_assignment -name VERILOG_FILE core/soc/bridge_sdram.v
 set_global_assignment -name VERILOG_FILE core/soc/dataslot_ctrl.v
-set_global_assignment -name VERILOG_FILE core/soc/periph_stub.v
+set_global_assignment -name VERILOG_FILE core/periph/periph_ram.v
+set_global_assignment -name VERILOG_FILE core/periph/periph_mem_port.v
+set_global_assignment -name VERILOG_FILE core/periph/blit_engine.v
+set_global_assignment -name VERILOG_FILE core/periph/blitter.v
+set_global_assignment -name VERILOG_FILE core/periph/mix_core.v
+set_global_assignment -name VERILOG_FILE core/periph/mixer.v
 set_global_assignment -name VERILOG_FILE core/soc/ufo50_blitter.v
 set_global_assignment -name VERILOG_FILE core/soc/ufo50_mixer.v
 set_global_assignment -name VERILOG_FILE core/pin_ddio_clk.v

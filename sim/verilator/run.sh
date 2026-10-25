@@ -11,6 +11,6 @@ $VERILATOR --cc --exe --build -j 2 -O3 --x-assign fast --x-initial fast --noasse
     -Wno-fatal -Wno-WIDTH -Wno-UNUSED -Wno-PINCONNECTEMPTY -Wno-CASEINCOMPLETE -Wno-MULTIDRIVEN \
     -Wno-UNOPTFLAT -Wno-SELRANGE -Wno-BLKANDNBLK -Wno-COMBDLY -Wno-LATCH -Wno-TIMESCALEMOD \
     --top-module vl_top -Mdir sim/out/vl_obj \
-    sim/verilator/vl_top.v src/fpga/core/ufo50_video.v src/fpga/core/soc/*.v src/fpga/core/cpu/VexRiscv.v \
+    sim/verilator/vl_top.v src/fpga/core/ufo50_video.v src/fpga/core/soc/*.v src/fpga/core/periph/*.v src/fpga/core/cpu/VexRiscv.v \
     sim/verilator/tb_soc.cpp -CFLAGS "-O2" >sim/out/verilator_build.log 2>&1 || { tail -30 sim/out/verilator_build.log; exit 1; }
 ./sim/out/vl_obj/Vvl_top "$@"
