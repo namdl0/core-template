@@ -1,4 +1,11 @@
-# Core Template
+# UFO 50 for Analogue Pocket (work in progress)
+
+Branch `ufo50-m1`: core `namdl0.UFO50`, 384x216 @ 60 Hz test pattern (milestone M1).
+See [BUILDING.md](BUILDING.md) for compiling in Quartus, packaging and installing.
+
+Based on Analogue's openFPGA core template:
+
+## Core Template
 This is a template repository for a core which contains all of the core definition JSON files and FPGA starter code.
 
 ## Legal

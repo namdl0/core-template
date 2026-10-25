@@ -1,0 +1,6 @@
+build/
+sim/*.ppm
+sim/*.vvp
+sim/*.vcd
+__pycache__/
+*.pyc
