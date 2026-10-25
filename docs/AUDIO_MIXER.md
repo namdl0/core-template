@@ -30,7 +30,7 @@ SoC-facing wrapper).
 | Offset | Name | R/W | |
 |---|---|---|---|
 | `0x00` | `ID` | R | `"MIX1"` |
-| `0x04` | `STATUS` | R | `[10:0]` command FIFO words free, `[31:16]` output FIFO level |
+| `0x04` | `STATUS` | R | `[31:16]` command FIFO words free, low bits output FIFO level (as implemented in `mixer.v`; an earlier version of this table had the two fields swapped) |
 | `0x08` | `CTRL` | RW | `[0]` enable, `[2]` soft reset |
 | `0x0C` | `SAMPLES` | R | samples produced since reset |
 | `0x10` | `MASTER_GAIN` | — | **command**, not a plain register — see below |

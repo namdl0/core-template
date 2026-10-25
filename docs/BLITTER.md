@@ -23,7 +23,7 @@ map contract).
 | Offset | Name | R/W | |
 |---|---|---|---|
 | `0x00` | `ID` | R | `"BLT1"` (0x424C_5431) |
-| `0x04` | `STATUS` | R | `[15:0]` command FIFO words free, `[16]` FIFO empty, `[17]` IRQ pending, `[0]` busy |
+| `0x04` | `STATUS` | R | `[31:16]` command FIFO words free, `[2]` FIFO empty, `[1]` IRQ pending, `[0]` busy (as implemented in `blitter.v`; an earlier version of this table had the fields at the wrong bits) |
 | `0x08` | `CTRL` | RW | `[0]` IRQ enable, `[1]` palette-cache flush (self-clearing), `[2]` soft reset (self-clearing) |
 | `0x0C` | `FENCE` | R | value of the last executed `FENCE` command |
 | `0x10` | `IRQ_ACK` | W | write 1 to clear the pending IRQ |
@@ -203,4 +203,4 @@ pointers), used to produce `expect.hex`.
   but the real arbiter's worst-case latency bound (`docs/MEMORY_MAP.md` says "below 256 cycles") is wider
   than tested here.
 - `FENCE`'s IRQ is wired but the firmware side (clearing `IRQ_PENDING` bit 2) is the SoC/firmware team's
-  to exercise; only polling (`STATUS` bit 17 / `IRQ_ACK`) was tested here.
+  to exercise; only polling (`STATUS` bit 1 / `IRQ_ACK`) was tested here.

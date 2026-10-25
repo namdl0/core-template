@@ -1,5 +1,7 @@
 /*
- * main.c - UFO50 Pocket SoC, milestone M3 exit test ("hello").
+ * main.c - UFO50 Pocket SoC, milestone M3/M4 exit test ("hello").
+ * M4: the PERIPH lines test the real blitter and mixer (m4.c); SELECT in the live
+ * area opens the blitter demo (ABGR8888 framebuffer), A plays an ADPCM blip.
  *
  * Shows on screen: CPU clock (nominal and measured against the 60 Hz video timing),
  * cache/FPU configuration, data slots and a CRC32 of slot 0, a 0x0180 read test,
@@ -12,6 +14,7 @@
 #include "soc.h"
 #include "console.h"
 #include "dataslot.h"
+#include "m4.h"
 
 #ifdef SIM
 #define MEMTEST_BYTES   (64u * 1024u)
@@ -125,22 +128,19 @@ static double __attribute__((noipa)) bench_sqrt(int n)
     return s;
 }
 
-/* ------------------------------------------------------------------ peripherals */
-static int periph_test(uint32_t base, uint32_t id, uint32_t src, uint32_t dst)
+/* ------------------------------------------------------------------ M4 demo control */
+static uint32_t demo_keys0;
+static int demo_keep_going(uint32_t frame, uint32_t keys)
 {
-    if (REG32(base) != id) return 0;
-    REG32(base + 4) = 0x12345678u;
-    REG32(base + 0x1C) = ~0x12345678u;
-    if (REG32(base + 4) != 0x12345678u || REG32(base + 0x1C) != ~0x12345678u) return 0;
-    uint32_t *s = (uint32_t *)(uintptr_t)src, *d = (uint32_t *)(uintptr_t)dst;
-    for (int i = 0; i < 8; i++) { s[i] = id ^ (i * 0x01010101u); d[i] = 0; }
-    REG32(base + 0x24) = src;
-    REG32(base + 0x28) = dst;
-    REG32(base + 0x20) = 1;
-    while (REG32(base + 0x20) & 1) { }
-    dcache_invalidate();
-    for (int i = 0; i < 8; i++) if (d[i] != (id ^ (i * 0x01010101u))) return 0;
-    return 1;
+#ifdef SIM
+    (void)keys;
+    return frame < 6;                       /* the testbench compares the ABGR8888 frames */
+#else
+    (void)frame;
+    int sel = (keys & KEY_SELECT) && !(demo_keys0 & KEY_SELECT);
+    demo_keys0 = keys;
+    return !sel;
+#endif
 }
 
 /* ------------------------------------------------------------------ live area */
@@ -179,7 +179,7 @@ int main(void)
     DEBUG_OUT = 0x00000001u;
     con_init(C_NAVY);
     con_color(C_YELLOW, C_NAVY);
-    con_puts("UFO50 Pocket SoC - M3 hello\n");
+    con_puts("UFO50 Pocket SoC - M4 hello\n");
     con_color(C_WHITE, C_NAVY);
 
     /* ---- CPU */
@@ -296,22 +296,46 @@ int main(void)
     }
     DEBUG_OUT = 0x00000006u;
 
-    /* ---- blitter / mixer port stubs */
+    /* ---- blitter / mixer (M4: the real peripherals) */
     {
-        label("PERIPH "); con_puts("blit ");
-        pass(periph_test(BLIT_BASE, 0x424C4954u, HEAP_BASE + 0x200000, HEAP_BASE + 0x200100));
-        con_puts("  mixer ");
-        pass(periph_test(MIX_BASE, 0x4D495852u, HEAP_BASE + 0x200200, HEAP_BASE + 0x200300));
+        uint32_t bcyc; int bad;
+        int bok = blit_test(clk_hz, &bcyc, &bad);
+        label("BLIT "); con_puts("11 cmds vs C model "); pass(bok);
+        con_puts("  "); con_dec(bcyc); con_puts(" cyc");
+        if (bad > 0) { con_puts(" bad px "); con_dec((uint32_t)bad); }
+        con_putc('\n');
+        DEBUG_OUT = 0x00000008u;
+        uint32_t rate, bms, und;
+        int mok = mix_test(clk_hz, &rate, &bms, &und);
+        label("MIX  "); con_dec(rate); con_puts(" Hz  adpcm blip "); con_dec(bms);
+        con_puts(" ms  und "); con_dec(und); con_puts("  "); pass(mok);
         con_putc('\n');
     }
     con_color(C_GREY, C_NAVY);
-    con_goto(0, 20); con_puts("Live (A = cyan block):");
+    con_goto(0, 20); con_puts("Live (A: blip+cyan, SELECT: blitter demo):");
     DEBUG_OUT = 0x00000007u;
 
     /* ---- live loop, double buffered */
     int back = 1;
-    uint32_t frame = 0;
+    uint32_t frame = 0, keys_prev = CONT1_KEY;
+#ifdef SIM
+    demo_keys0 = 0;
+    m4_demo(clk_hz, demo_keep_going);
+    VID_CTRL = VID_CTRL_SCANOUT;
+#endif
     for (;;) {
+        uint32_t k = CONT1_KEY;
+        if ((k & ~keys_prev) & KEY_A) blip();
+        if ((k & ~keys_prev) & KEY_SELECT) {
+            demo_keys0 = k;
+            m4_demo(clk_hz, demo_keep_going);
+            /* back to the RGB565 text screen: both buffers still hold the console text */
+            FB_ADDR = back ? FB0_ADDR : FB1_ADDR;
+            VID_CTRL = VID_CTRL_SCANOUT;
+            while (VID_STATUS & VID_STATUS_SWAP_PEND) { }
+            k = CONT1_KEY;
+        }
+        keys_prev = k;
         uint16_t *fb = con_fb(back);
         draw_live(fb, frame, CONT1_KEY);
         FB_ADDR = back ? FB1_ADDR : FB0_ADDR;

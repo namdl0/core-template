@@ -29,8 +29,8 @@ data slots into SDRAM before it releases reset.
 | `0x5000_0000 - 0x53FF_FFFF` | 64 MB | SDRAM, uncached alias | no | Same memory as `0x1000_0000`. Use for buffers written by DMA/blitter, or invalidate the D$ first. |
 | `0x8000_0000 - 0x8000_FFFF` | 64 KB | System registers | no | Section 3.1 |
 | `0x8001_0000 - 0x8001_FFFF` | 64 KB | Data-slot controller | no | Section 3.2 |
-| `0x8002_0000 - 0x8002_FFFF` | 64 KB | **Blitter** (Wishbone slave) | no | Section 4. Stub in M3: test registers |
-| `0x8003_0000 - 0x8003_FFFF` | 64 KB | **Audio mixer** (Wishbone slave) | no | Section 4. Stub in M3: test registers |
+| `0x8002_0000 - 0x8002_FFFF` | 64 KB | **Blitter** (Wishbone slave) | no | Section 4. Real peripheral from M4 (`docs/BLITTER.md`, `docs/AUDIO_MIXER.md`); stub with test registers in M3 |
+| `0x8003_0000 - 0x8003_FFFF` | 64 KB | **Audio mixer** (Wishbone slave) | no | Section 4. Real peripheral from M4 (`docs/BLITTER.md`, `docs/AUDIO_MIXER.md`); stub with test registers in M3 |
 | `0x8004_0000 - 0x8FFF_FFFF` | | reserved (reads 0, writes ignored, acked) | no | |
 | everything else | | unmapped (reads `0xDEAD_BEEF`, acked) | | |
 
@@ -109,7 +109,7 @@ selected lanes (sel). Undefined offsets read 0.
 | `0x104` | `VID_FRAME` | R | frame counter, +1 at each vblank start |
 | `0x108` | `FB_ADDR` | RW | Address of the **front buffer** (CPU byte address in `0x1000_0000`+, 256-byte aligned). The written value takes effect at the next vblank start (`VID_STATUS` bit 1 is set until then). Reset `0x13F8_0000`. |
 | `0x10C` | `FB_ACTIVE` | R | address currently scanned out |
-| `0x110` | `VID_CTRL` | RW | bit 1 = M1 test pattern (wins over bit 0), bit 0 = framebuffer scanout; both 0 = solid `VID_BORDER` colour. **Reset value 2 (test pattern)**: if the Pocket shows the M1 pattern, the firmware never started |
+| `0x110` | `VID_CTRL` | RW | bit 1 = M1 test pattern (wins over bit 0), bit 0 = framebuffer scanout; both 0 = solid `VID_BORDER` colour. bit 2 = framebuffer format: 0 RGB565, 1 ABGR8888 (section 6); like `FB_ADDR` it takes effect at the next vblank start, so write both before waiting for the swap. **Reset value 2 (test pattern, RGB565)**: if the Pocket shows the M1 pattern, the firmware never started |
 | `0x114` | `VID_BORDER` | RW | RGB888 colour shown when `VID_CTRL` = 0 |
 | `0x120` | `SDRAM_STATUS` | R | bit 0 = SDRAM controller initialised |
 | `0xFFC` | `DEBUG_OUT` | W | ignored by the hardware; the firmware writes progress markers here, which the simulation testbenches (and SignalTap) watch |
@@ -219,10 +219,22 @@ Protocol:
   meaningful in a cycle where your own `mem_rvalid` is high.
 - The CPU's D$ is not snooped. After the blitter writes memory the CPU will read (rare: the framebuffer is
   write-only for the CPU), the CPU invalidates its D$ or reads through `0x5xxx_xxxx`. A master must not assume a bound on `ready`
-  latency, but video takes at most ~10% of SDRAM time and a CPU burst is <= 32 B.
+  latency, but video takes ~12% of SDRAM time in RGB565 and ~25% in ABGR8888 (frame average; up to ~50% during
+  active lines), and a CPU burst is <= 32 B.
 - Peak bandwidth: 16-bit SDR at 57.75 MHz = 115 MB/s raw; ~75-90 MB/s for 32-byte bursts.
 
 ## 6. Framebuffer format
+
+Two formats, selected by `VID_CTRL` bit 2 (latched at vblank together with `FB_ADDR`):
+
+**ABGR8888 (bit 2 = 1, M4+, what the game runtime uses)**: 384 x 216 x 32-bit `0xAABBGGRR` (R in bits 7:0,
+alpha ignored by the scanout), exactly the pixel format the blitter writes (`docs/BLITTER.md`). Pixel (x, y) at
+`FB_ADDR + y*1536 + x*4`, stride 1536 bytes, size 331,776 bytes, so it does **not** fit the 256 KB RGB565
+slots below. The M4 firmware uses `0x13A0_0000` / `0x13A8_0000`; the runtime should move its two buffers to
+512 KB-aligned slots of its choice. Full 8-bit RGB goes to the Pocket. Scanout cost: 48 x 32-byte bursts per
+line (vs 24), about 50% of SDRAM time during active lines and ~25% averaged over the frame.
+
+**RGB565 (bit 2 = 0, reset default, M3 text console)**:
 
 - 384 x 216 pixels, **RGB565**, little-endian 16-bit (`pixel = r5<<11 | g6<<5 | b5`), pixel (x, y) at
   `FB_ADDR + y*768 + x*2`. Stride 768 bytes, size 165,888 bytes. Two pixels per 32-bit word: the
@@ -273,3 +285,6 @@ I$ invalidate: `fence.i`. The FPU must be enabled before use (`mstatus.FS`, done
   additions: module/file names `ufo50_blitter`/`ufo50_mixer`, a `present` output, and the arbiter port numbers.
   Registers: `VID_STATUS[23:16]` is the last fetched line (was "current line"); `VID_CTRL` reset value is 2
   (test pattern); new `SDRAM_STATUS` (0x120) and `DEBUG_OUT` (0xFFC); section 8 (runtime notes) added.
+- v0.3 (2026-10-25, branch `ufo50-m4`): the real blitter/mixer replace the stubs (`SYS_CONFIG` bits 25/26 read
+  1). New `VID_CTRL` bit 2: ABGR8888 framebuffer format, needed because the blitter writes 32-bit pixels.
+  RGB565 stays the reset default, so M3 firmware behaves exactly as before.

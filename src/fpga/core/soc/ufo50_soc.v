@@ -500,6 +500,7 @@ end
     reg  [15:0] key_prev;
     reg  [31:0] fb_addr;
     reg  [31:0] fb_active;
+    reg         vid_fmt32, fmt_active;   // VID_CTRL bit 2: 1 = ABGR8888 scanout (switches at vblank with FB_ADDR)
     reg         fb_swap_pend;
     reg  [31:0] vid_frame;
     reg         in_vblank;
@@ -540,6 +541,8 @@ always @(posedge clk_sys) begin
         fb_swap_pend <= 1'b0;
         vid_frame    <= 32'd0;
         vid_mode     <= 2'd2;           // M1 test pattern until firmware takes over
+        vid_fmt32    <= 1'b0;           // RGB565 (M3 format) until firmware selects ABGR8888
+        fmt_active   <= 1'b0;
         vid_border   <= 24'h000000;
         in_vblank    <= 1'b0;
         key_prev     <= 16'd0;
@@ -550,6 +553,7 @@ always @(posedge clk_sys) begin
             vid_frame    <= vid_frame + 32'd1;
             in_vblank    <= 1'b1;
             fb_active    <= fb_addr;
+            fmt_active   <= vid_fmt32;
             fb_swap_pend <= 1'b0;
         end
         if (vactive_pulse) in_vblank <= 1'b0;
@@ -566,7 +570,7 @@ always @(posedge clk_sys) begin
                 12'h020: irq_pend[4:0] <= irq_pend[4:0] & ~(m_dat_w[4:0] & 5'b10011);
                 12'h024: irq_en <= m_dat_w[4:0];
                 12'h108: begin fb_addr <= {m_dat_w[31:8], 8'd0}; fb_swap_pend <= 1'b1; end
-                12'h110: vid_mode <= m_dat_w[1] ? 2'd2 : {1'b0, m_dat_w[0]};
+                12'h110: begin vid_mode <= m_dat_w[1] ? 2'd2 : {1'b0, m_dat_w[0]}; vid_fmt32 <= m_dat_w[2]; end
                 12'h114: vid_border <= m_dat_w[23:0];
                 default: ;
                 endcase
@@ -602,7 +606,7 @@ always @(posedge clk_sys) begin
                 12'h104: sys_dat_r <= vid_frame;
                 12'h108: sys_dat_r <= fb_addr;
                 12'h10C: sys_dat_r <= fb_active;
-                12'h110: sys_dat_r <= {30'd0, vid_mode == 2'd2, vid_mode == 2'd1};
+                12'h110: sys_dat_r <= {29'd0, vid_fmt32, vid_mode == 2'd2, vid_mode == 2'd1};
                 12'h114: sys_dat_r <= {8'd0, vid_border};
                 12'h120: sys_dat_r <= {31'd0, sd_init_done};
                 default: sys_dat_r <= 32'd0;
@@ -617,7 +621,7 @@ end
 // ===========================================================================
 vid_scanout scan (
     .clk_sys(clk_sys), .rst_sys(rst_mem),
-    .fb_base(fb_active[25:0]),
+    .fb_base(fb_active[25:0]), .fmt32(fmt_active),
     .p_valid(p_valid[0]), .p_ready(p_ready[0]), .p_addr(p_addr[0*24 +: 24]), .p_len(p_len[0*3 +: 3]),
     .p_rvalid(p_rvalid[0]), .p_rdata(p_rdata),
     .vblank_pulse(vblank_pulse), .vactive_pulse(vactive_pulse), .line(vid_line),

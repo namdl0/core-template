@@ -16,3 +16,5 @@ void *memcpy(void *d, const void *s, size_t n)
     while (n--) *p++ = *q++;
     return d;
 }
+
+long labs(long v) { return v < 0 ? -v : v; }

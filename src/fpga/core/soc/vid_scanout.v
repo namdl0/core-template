@@ -1,9 +1,12 @@
 //
 // vid_scanout.v - framebuffer scanout for the UFO50 Pocket SoC (M3)
 //
-// Reads a 384x216 RGB565 framebuffer from SDRAM one line ahead into a dual-clock
-// line buffer (2 lines x 192 words), and feeds pixels to ufo50_video in the
-// 12.288 MHz pixel clock domain. Timing comes from ufo50_video's counters, so the
+// Reads a 384x216 framebuffer from SDRAM one line ahead into a dual-clock line
+// buffer (2 lines x 512 words), and feeds pixels to ufo50_video in the 12.288 MHz
+// pixel clock domain. Two formats (fmt32, latched by sysregs at vblank):
+//   0: RGB565, 2 pixels/word, stride 768 B, 24 bursts/line (M3)
+//   1: ABGR8888 (0xAABBGGRR, what the blitter writes), 1 pixel/word, stride
+//      1536 B, 48 bursts/line, full 8-bit RGB out (M4) Timing comes from ufo50_video's counters, so the
 // M1 timing (512x400 total, 60.000 Hz) is unchanged.
 //
 // Pixel latency: ufo50_video registers rgb from the current counters. This module
@@ -11,8 +14,8 @@
 // RAM read, matches the counters of that cycle.
 //
 // Fetch: at x == 0 of video line y (VB-1 <= y <= VB+V_ACTIVE-2), active line
-// y-VB+1 is requested. The sys side reads 24 bursts of 32 bytes from
-// fb_base + line*768 (~600 sys clocks of the 41.7 us line time).
+// y-VB+1 is requested. The sys side reads 24 (565) or 48 (8888) bursts of 32
+// bytes from fb_base + line*stride (line time is ~2400 sys clocks).
 //
 `default_nettype none
 
@@ -25,6 +28,7 @@ module vid_scanout #(
     input  wire         clk_sys,
     input  wire         rst_sys,
     input  wire [25:0]  fb_base,        // SDRAM byte offset of the front buffer (latched by sysregs at vblank)
+    input  wire         fmt32,          // 1 = ABGR8888, 0 = RGB565 (latched by sysregs at vblank)
 
     // SDRAM master port (read only)
     output wire         p_valid,
@@ -66,21 +70,29 @@ always @(posedge clk_vid) begin
     end
 end
 
-    // line buffer read
+    // format in the video domain (quasi-static: changes only at vblank, long
+    // before the next line fetch, so a plain 2-FF synchroniser is enough)
+    reg [1:0]  fmt_v = 2'b00;
+always @(posedge clk_vid) fmt_v <= {fmt_v[0], fmt32};
+    wire       f32_v = fmt_v[1];
+
+    // line buffer read: word address {line parity, word index within the line}
     wire [9:0] vx1  = vid_x - HBm1;                // = active x + 1
     wire [9:0] vy   = vid_y - VB[9:0];
-    wire [8:0] radr = {vy[0], vx1[8:1]};
+    wire [9:0] radr = f32_v ? {vy[0], vx1[8:0]} : {vy[0], 1'b0, vx1[8:1]};
     reg  [31:0] lb_q;
-    reg         half_sel;
-    reg  [31:0] lbuf [0:511];
+    reg         half_sel, f32_q;
+    reg  [31:0] lbuf [0:1023];
 
 always @(posedge clk_vid) begin
     lb_q     <= lbuf[radr];
     half_sel <= vx1[0];
+    f32_q    <= f32_v;
 end
 
     wire [15:0] px = half_sel ? lb_q[31:16] : lb_q[15:0];
-    assign pix_rgb = {px[15:11], px[15:13], px[10:5], px[10:9], px[4:0], px[4:2]};
+    assign pix_rgb = f32_q ? {lb_q[7:0], lb_q[15:8], lb_q[23:16]}
+                           : {px[15:11], px[15:13], px[10:5], px[10:9], px[4:0], px[4:2]};
 
 // ------------------------------------------------------------------ sys side
     reg [2:0] req_s, vbl_s, act_s;
@@ -94,18 +106,19 @@ end
     wire   req_pulse     = req_s[2] ^ req_s[1];
 
     reg        busy;
-    reg [4:0]  burst;           // 0..23
+    reg [5:0]  burst;           // 0..23 (565) or 0..47 (8888)
+    reg        lfmt;            // format of the line being fetched
     reg        issued;
     reg [2:0]  beat;
     reg [7:0]  fline;
     reg [25:0] laddr;           // byte offset of the current line
 
     assign p_valid = busy && !issued;
-    assign p_addr  = laddr[25:2] + {16'd0, burst, 3'b000};
+    assign p_addr  = laddr[25:2] + {15'd0, burst, 3'b000};
     assign p_len   = 3'd7;
 
     // line buffer write
-    wire [8:0] wadr = {fline[0], burst, beat};
+    wire [9:0] wadr = {fline[0], burst, beat};
 always @(posedge clk_sys)
     if (p_rvalid && busy) lbuf[wadr] <= p_rdata;
 
@@ -117,8 +130,11 @@ always @(posedge clk_sys) begin
         if (req_pulse) begin
             busy   <= 1'b1;
             fline  <= req_line_v;          // stable: changes once per video line
-            laddr  <= fb_base + {req_line_v, 9'd0} + {1'b0, req_line_v, 8'd0};
-            burst  <= 5'd0;
+            lfmt   <= fmt32;
+            // stride 768 = 512 + 256, or 1536 = 1024 + 512
+            laddr  <= fmt32 ? fb_base + {req_line_v, 10'd0} + {1'b0, req_line_v, 9'd0}
+                            : fb_base + {req_line_v, 9'd0}  + {1'b0, req_line_v, 8'd0};
+            burst  <= 6'd0;
             beat   <= 3'd0;
             issued <= 1'b0;
         end
@@ -128,11 +144,11 @@ always @(posedge clk_sys) begin
             beat <= beat + 3'd1;
             if (beat == 3'd7) begin
                 issued <= 1'b0;
-                if (burst == 5'd23) begin
+                if (burst == (lfmt ? 6'd47 : 6'd23)) begin
                     busy <= 1'b0;
                     line <= fline;
                 end else
-                    burst <= burst + 5'd1;
+                    burst <= burst + 6'd1;
             end
         end
     end

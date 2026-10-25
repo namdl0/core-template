@@ -175,6 +175,7 @@ int main(int argc, char **argv) {
     long mismatches = 0;
     bool frame_valid = false, cmp_this = false;
     uint32_t fb_at_start = 0;
+    bool fmt32_at_start = false;
 
     uint32_t marker = 0, live = 0;
     bool done = false, trapped = false;
@@ -248,7 +249,7 @@ int main(int argc, char **argv) {
                     captured = 0;
                 }
                 if (top->v_de && captured < 384 * 216) {
-                    if (captured == 0) { fb_at_start = top->fb_active; cmp_this = (marker == 7) || live > 0; }
+                    if (captured == 0) { fb_at_start = top->fb_active; fmt32_at_start = top->fb_fmt32; cmp_this = (marker == 7) || live > 0; }
                     cap[captured++] = top->v_rgb;
                     // compare at the last active pixel: in vertical blank the firmware may already
                     // draw into this buffer again (it is the next back buffer)
@@ -257,9 +258,15 @@ int main(int argc, char **argv) {
                         uint32_t base = fb_at_start & 0x3FFFFFF;
                         long before = mismatches;
                         for (int a = 0; a < 384 * 216; a++) {
-                            uint16_t px = sd.hw(base + 2 * a);
-                            uint32_t r = (px >> 11) & 31, g = (px >> 5) & 63, b = px & 31;
-                            uint32_t e = ((r << 3 | r >> 2) << 16) | ((g << 2 | g >> 4) << 8) | (b << 3 | b >> 2);
+                            uint32_t e;
+                            if (fmt32_at_start) {   // ABGR8888 (0xAABBGGRR), shown as RGB888
+                                uint32_t lo = sd.hw(base + 4 * a), hi = sd.hw(base + 4 * a + 2);
+                                e = ((lo & 255) << 16) | (lo & 0xFF00) | (hi & 255);
+                            } else {
+                                uint16_t px = sd.hw(base + 2 * a);
+                                uint32_t r = (px >> 11) & 31, g = (px >> 5) & 63, b = px & 31;
+                                e = ((r << 3 | r >> 2) << 16) | ((g << 2 | g >> 4) << 8) | (b << 3 | b >> 2);
+                            }
                             if (e != cap[a]) {
                                 if (mismatches < 10)
                                     printf("pixel mismatch frame %d (%d,%d): got %06x want %06x\n",
@@ -267,8 +274,8 @@ int main(int argc, char **argv) {
                                 mismatches++;
                             }
                         }
-                        printf("[%.3f ms] frame %d (buffer %08x) compared with SDRAM: %ld mismatches\n",
-                               t / 1e9, frame_no, fb_at_start, mismatches - before);
+                        printf("[%.3f ms] frame %d (buffer %08x, %s) compared with SDRAM: %ld mismatches\n",
+                               t / 1e9, frame_no, fb_at_start, fmt32_at_start ? "ABGR8888" : "RGB565", mismatches - before);
                     }
                 }
             }

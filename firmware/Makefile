@@ -16,17 +16,18 @@ ARCH    = -march=rv32imfd_zicsr_zifencei -mabi=ilp32d
 CFLAGS  = $(ARCH) -O2 -g -ffreestanding -fno-builtin -fno-math-errno -Wall -Wextra -Wno-unused-parameter \
           -ffunction-sections -fdata-sections -Icommon
 LDFLAGS = $(ARCH) -nostdlib -nostartfiles -Wl,--gc-sections -Wl,-Map,$@.map -T common/link.ld
-SRCS    = common/crt0.S common/console.c common/dataslot.c common/libc_min.c hello/main.c
+SRCS    = common/crt0.S common/console.c common/dataslot.c common/libc_min.c hello/main.c hello/m4.c \
+          ../sim/periph/model/blit_model.c ../sim/periph/model/adpcm.c
 
 all: ../src/fpga/core/fw/boot_b0.hex
 sim: ../sim/fw/boot_b0.hex
 
-build/hello.elf: $(SRCS) common/*.h common/link.ld
+build/hello.elf: $(SRCS) common/*.h hello/*.h common/link.ld
 	@mkdir -p build
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(SRCS) -lgcc
 	$(SIZE) $@
 
-build/hello_sim.elf: $(SRCS) common/*.h common/link.ld
+build/hello_sim.elf: $(SRCS) common/*.h hello/*.h common/link.ld
 	@mkdir -p build
 	$(CC) $(CFLAGS) -DSIM $(LDFLAGS) -o $@ $(SRCS) -lgcc
 	$(SIZE) $@

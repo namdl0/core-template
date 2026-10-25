@@ -9,6 +9,39 @@ and shows the M3 exit test on screen. The memory map and peripheral contract is
 The steps below assume Windows. Linux works the same way. Use `python3` instead
 of `py`, and `/media/...` instead of `E:\`.
 
+## M4 (branch `ufo50-m4`): real blitter and audio mixer
+
+`ufo50-m4` = M3 + the hardware blitter and 32-voice mixer from `ufo50-periph` (`src/fpga/core/periph/`,
+`docs/BLITTER.md`, `docs/AUDIO_MIXER.md`) in place of the M3 stubs, plus:
+- **ABGR8888 framebuffer mode** (`VID_CTRL` bit 2, `docs/MEMORY_MAP.md` §6): the blitter writes 32-bit pixels,
+  so the scanout can now read them (full 24-bit colour to the Pocket). RGB565 stays the default, so the text
+  screen is unchanged.
+- The hello firmware (`firmware/hello/m4.c`) now tests the real peripherals.
+
+Build and package exactly as for M3 (steps 2-6 below, `git checkout ufo50-m4`). On the Pocket the text screen
+is the same as M3 except the last two test lines, which now read for example
+```
+BLIT 11 cmds vs C model PASS  1234 cyc
+MIX  48000 Hz  adpcm blip 100 ms  und 0  PASS
+```
+- **BLIT**: the hardware ran a mix of fills, blits (flip, tint, 50% alpha, additive, subtract, fog), a scaled
+  `BLIT_MAP` and a clear, and its output matched the bit-exact C model pixel for pixel. FAIL with `bad px N`
+  = N pixels differ; FAIL with no count = the blitter never finished (timeout).
+- **MIX**: the measured sample rate (should be 48000 +/- 1000), the ADPCM one-shot's play time (about 100 ms)
+  and output underruns (should be 0).
+- **Sound:** a ~0.3 s 441 Hz beep while the MIX line is being tested, fading out, then a short higher "blip".
+- In the live area, **A** plays the blip again, and **SELECT** opens the **blitter demo**: scrolling brown
+  tiles, six bouncing saucers (one see-through, one brighter/additive), a saucer that grows and shrinks in the
+  bottom-right corner, and two lines of text at the top. The second line is a live measurement:
+  `blit <N>k cyc  wait <W>k  mix <M>  und <U>` = blitter busy cycles per frame (thousands), of which cycles
+  spent waiting for SDRAM, mixer cycles for the last sample, and audio underruns. B tints the saucers blue.
+  SELECT goes back to the text screen. In simulation the demo frame needs ~1,100k blitter cycles (about 19 ms,
+  so the demo runs at ~30 fps), ~84% of it waiting for SDRAM: please note the numbers your Pocket shows.
+
+Please report: a photo of the text screen and of the demo, whether you heard the beep and the blip, and the
+Quartus resource/timing numbers (the blitter + mixer add roughly 7,500 LUTs and ~30 M10K blocks by the
+periph agent's estimate; the 57.75 MHz clock must still have positive slack, see step 3a otherwise).
+
 ## What's new in M3
 
 | Path | What it is |

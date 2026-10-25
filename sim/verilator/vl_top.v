@@ -43,6 +43,7 @@ module vl_top (
     output wire         dbg_wr,
     output wire [31:0]  dbg_val,
     output wire [31:0]  fb_active,
+    output wire         fb_fmt32,
     output wire         dbg_dline,     // D$ line refill command accepted
     output wire         dbg_drsp_last, // last beat of a D$ response
     output wire         dbg_iline,
@@ -62,6 +63,16 @@ module vl_top (
         .src_mode(v_mode), .fb_rgb(fb_rgb), .border_rgb(border), .hcount(hc), .vcount(vc)
     );
 
+    // 48 kHz audio_tick in clk_sys (on the Pocket, core_top derives it from the I2S LRCK):
+    // 57.75 MHz / 48 kHz = 1203.125 cycles, as a fractional accumulator in 1/1024 cycles
+    reg [20:0] aud_acc = 21'd0;
+    reg        aud_tick = 1'b0;
+    always @(posedge clk_sys) begin
+        aud_tick <= 1'b0;
+        if (aud_acc + 21'd1024 >= 21'd1232000) begin aud_acc <= aud_acc + 21'd1024 - 21'd1232000; aud_tick <= 1'b1; end
+        else aud_acc <= aud_acc + 21'd1024;
+    end
+
     ufo50_soc #(.BOOT_HEX("sim/fw/boot"), .SDRAM_INIT_CYCLES(16'd200)) soc (
         .clk_sys(clk_sys), .rst_mem(rst_mem), .rst_sys(rst_sys),
         .sd_a(sd_a), .sd_ba(sd_ba), .sd_dqm(sd_dqm), .sd_cke(sd_cke), .sd_ras_n(sd_ras_n),
@@ -74,13 +85,14 @@ module vl_top (
         .datatable_addr(dt_addr), .datatable_q(dt_q),
         .dataslot_allcomplete(1'b1), .osnotify_inmenu(1'b0), .rtc_epoch_seconds(32'd0), .rtc_valid(1'b0),
         .cont_key({96'd0, cont1_key}), .cont_joy(128'd0), .cont_trig(64'd0),
-        .audio_tick(1'b0), .audio_l(aud_l), .audio_r(aud_r)
+        .audio_tick(aud_tick), .audio_l(aud_l), .audio_r(aud_r)
     );
 
     // firmware DEBUG_OUT (0x80000FFC) marker writes
     assign dbg_wr    = soc.m_cyc & soc.m_we & (soc.m_adr == 30'h2000_03FF) & soc.sys_ack;
     assign dbg_val   = soc.m_dat_w;
     assign fb_active = soc.fb_active;
+    assign fb_fmt32  = soc.fmt_active;
     assign dbg_dline     = soc.dBus_cmd_valid & soc.dBus_cmd_ready & ~soc.dBus_cmd_payload_wr & (soc.dBus_cmd_payload_size == 3'd5);
     assign dbg_drsp_last = soc.dBus_rsp_valid & soc.dBus_rsp_payload_last;
     assign dbg_iline     = soc.iBus_cmd_valid & soc.iBus_cmd_ready;
