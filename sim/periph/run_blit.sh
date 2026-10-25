@@ -1,6 +1,6 @@
 #!/bin/sh
 # Blitter: C-model unit tests + random HDL-vs-C-model runs (+ optional dump replay).
-# Usage: sh sim/periph/run_blit.sh [workdir]   (IVERILOG/VVP on PATH)
+# Usage: [DUMPS="a.dl b.dl"] sh sim/periph/run_blit.sh [workdir]   (iverilog/vvp on PATH)
 set -e
 cd "$(dirname "$0")/../.."
 W=${1:-sim/periph/work}; mkdir -p $W
@@ -20,3 +20,12 @@ run() { # name gen-args iverilog-params
 run rnd_fast "random 300 1" -Ptb_blitter.LAT=6
 run rnd_stall "random 300 2" -Ptb_blitter.LAT=20 -Ptb_blitter.STALL_PCT=30 -Ptb_blitter.GAP_PCT=30 -Ptb_blitter.MAX_BURST=16
 run rnd_16bit "random 300 3" -Ptb_blitter.LAT=10 -Ptb_blitter.BEAT_CYC=2 -Ptb_blitter.MAX_BURST=8
+# Real frames: dumps written by the runtime's `make blitmodel` build
+#   UFO_BLIT=check UFO_DLDUMP=barb.dl UFO_DLFRAMES=3000-3000 ufo50rt-bm ... (docs/BLITTER.md)
+for d in $DUMPS; do
+    n=$(basename $d .dl); mkdir -p $W/$n
+    $W/blitgen dump $d $W/$n ${NSEG:-5} | sed "s/^/$n: /"
+    iverilog -g2012 -o $W/$n/tb.vvp -Ptb_blitter.LAT=10 -Ptb_blitter.BEAT_CYC=2 -Ptb_blitter.MAX_BURST=32 $SRC
+    vvp -n $W/$n/tb.vvp +mem=$W/$n/mem.bin +cmds=$W/$n/cmds.hex +out=$W/$n/out.hex $(cat $W/$n/args.txt) | grep blitter
+    if cmp -s $W/$n/out.hex $W/$n/expect.hex; then echo "$n: PASS (HDL == C model == rc_exec)"; else echo "$n: FAIL"; exit 1; fi
+done

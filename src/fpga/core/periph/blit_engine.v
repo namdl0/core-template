@@ -282,7 +282,7 @@ module blit_engine #(
             end
             // P1 -> P2
             p2_v <= p1_v; p2_last <= p1_last; p2_slot <= p1_slot; p2_i <= p1_i;
-            p2_ok <= p1_ok; p2_bs <= p1_bi[1:0]; p2_dst <= db_rd;
+            p2_ok <= p1_ok; p2_bs <= p1_bi[1:0]; p2_dst <= needs_dst ? db_rd : 32'd0;
             // P2 -> P3
             p3_v <= p2_v; p3_last <= p2_last; p3_slot <= p2_slot; p3_i <= p2_i; p3_ok <= p2_ok; p3_dst <= p2_dst;
             // P3 -> P4

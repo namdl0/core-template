@@ -167,7 +167,7 @@ static int gen_dump(const char *file, const char *dir, int maxseg, int skipseg) 
     if (!dir) return bad_px != 0;
     /* pass 2: memory image of the chosen segments (each segment: own surface copy). Pages
      * are cropped to the texel bounding box used in the whole dump. */
-    for (int i = 0; i < ndp; i++) if (dp[i].x1 >= 0) {
+    for (int i = 0; i < ndp; i++) if (dp[i].idx && dp[i].x1 >= 0) {
         DPage *P = &dp[i]; int cw = P->x1 - P->x0 + 1, ch = P->y1 - P->y0 + 1, st = (cw + 3) & ~3;
         P->addr = alloc(st * ch); P->paladdr = alloc(1024);
         for (int y = 0; y < ch; y++) memcpy(mem + P->addr + y * st, P->idx + (size_t)(P->y0 + y) * P->w + P->x0, cw);
@@ -182,7 +182,8 @@ static int gen_dump(const char *file, const char *dir, int maxseg, int skipseg) 
         if (fread(mem + sa, 4, (size_t)sw * sh, f) != (size_t)sw * sh) return 1;
         regionw = (sa + 4 * sw * sh - region0) / 4;
         uint32_t w[8] = {BM_SET_DST, sa, (uint32_t)sw * 4, 0, 0, 0, 0, 0}; emit(w);
-        while (fread(tag, 1, 4, f) == 4 && !memcmp(tag, "CMD ", 4)) {
+        while (fread(tag, 1, 4, f) == 4 && (!memcmp(tag, "CMD ", 4) || !memcmp(tag, "PAGE", 4))) {
+            if (!memcmp(tag, "PAGE", 4)) { rd(f); int pw = rd(f), ph = rd(f); fseek(f, 1024 + (long)pw * ph, SEEK_CUR); continue; }
             for (int i = 0; i < 8; i++) w[i] = rd(f);
             int W = w[2] & 0xFFFF, H = w[2] >> 16;
             if (BM_OP(w[0]) == BM_SET_TEX) {
