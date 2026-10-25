@@ -1,0 +1,16 @@
+UFO 50 for Analogue Pocket (work in progress) - namdl0
+
+A port of the UFO 50 runtime to the Analogue Pocket openFPGA platform.
+
+Version 0.0.1 (milestone M1) only shows a 384x216 video test pattern:
+colour bars, a grey ramp, checkerboards, a white border on the outermost
+pixels with a red ring inside it, and a bouncing box.
+  A held      : box turns cyan
+  B held      : box freezes
+  Select held : greyscale
+  Start held  : inverted colours
+
+No game files are needed or loaded yet. Later versions will read files
+converted from your own copy of UFO 50; none are distributed with this core.
+
+UFO 50 is (c) Mossmouth. This is an unofficial fan project.

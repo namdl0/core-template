@@ -1,0 +1,110 @@
+{
+    "data": {
+        "magic": "APF_VER_1",
+        "data_slots": [
+            {
+                "name": "Program",
+                "id": 0,
+                "required": false,
+                "parameters": "0x00",
+                "extensions": ["gmp"],
+                "filename": "ufo50.gmp",
+                "size_maximum": "0x02800000",
+                "address": "0x00000000"
+            },
+            {
+                "name": "Asset Index",
+                "id": 1,
+                "required": false,
+                "parameters": "0x00",
+                "extensions": ["gma"],
+                "filename": "ufo50.gma",
+                "size_maximum": "0x00800000",
+                "address": "0x02800000"
+            },
+            {
+                "name": "Texture Pack",
+                "id": 2,
+                "required": false,
+                "deferload": true,
+                "parameters": "0x00",
+                "extensions": ["bin"],
+                "filename": "ufo50_tex.bin"
+            },
+            {
+                "name": "Audio Pack",
+                "id": 3,
+                "required": false,
+                "deferload": true,
+                "parameters": "0x00",
+                "extensions": ["bin"],
+                "filename": "ufo50_snd.bin"
+            },
+            {
+                "name": "Text",
+                "id": 4,
+                "required": false,
+                "parameters": "0x00",
+                "extensions": ["txt"],
+                "filename": "english.txt",
+                "size_maximum": "0x00100000",
+                "address": "0x03000000"
+            },
+            {
+                "name": "Save 1",
+                "id": 10,
+                "required": false,
+                "nonvolatile": true,
+                "parameters": "0x00",
+                "extensions": ["ufo"],
+                "filename": "save1.ufo",
+                "size_maximum": "0x00010000",
+                "address": "0x20000000"
+            },
+            {
+                "name": "Save 2",
+                "id": 11,
+                "required": false,
+                "nonvolatile": true,
+                "parameters": "0x00",
+                "extensions": ["ufo"],
+                "filename": "save2.ufo",
+                "size_maximum": "0x00010000",
+                "address": "0x20010000"
+            },
+            {
+                "name": "Save 3",
+                "id": 12,
+                "required": false,
+                "nonvolatile": true,
+                "parameters": "0x00",
+                "extensions": ["ufo"],
+                "filename": "save3.ufo",
+                "size_maximum": "0x00010000",
+                "address": "0x20020000"
+            },
+            {
+                "name": "Account",
+                "id": 13,
+                "required": false,
+                "nonvolatile": true,
+                "parameters": "0x00",
+                "extensions": ["ufo"],
+                "filename": "account.ufo",
+                "size_maximum": "0x00010000",
+                "address": "0x20030000"
+            },
+            {
+                "name": "Config",
+                "id": 14,
+                "required": false,
+                "nonvolatile": true,
+                "parameters": "0x00",
+                "extensions": ["json"],
+                "filename": "config.json",
+                "size_maximum": "0x00001000",
+                "address": "0x20040000"
+            }
+        ]
+    }
+}
