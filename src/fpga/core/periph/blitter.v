@@ -16,14 +16,15 @@ module blitter #(
     input  wire        wb_stb_i,
     output reg         wb_ack_o,
     output wire        irq,
-    // SDRAM master (SoC side of periph_mem_port)
-    output wire        mem_valid,
-    input  wire        mem_ready,
-    output wire [31:0] mem_addr,
-    output wire        mem_write,
-    output wire [8:0]  mem_len,
+    // SDRAM master port (docs/MEMORY_MAP.md section 5: arbiter port X0)
+    output wire        mem_cmd_valid,
+    output wire        mem_cmd_we,
+    output wire [25:2] mem_cmd_addr,
+    output wire [2:0]  mem_cmd_len,
     output wire [31:0] mem_wdata,
-    output wire [3:0]  mem_be,
+    output wire [3:0]  mem_wstrb,
+    input  wire        mem_cmd_ready,
+    input  wire        mem_wready,
     input  wire [31:0] mem_rdata,
     input  wire        mem_rvalid
 );
@@ -46,11 +47,12 @@ module blitter #(
         .m_valid(m_valid), .m_ready(m_ready), .m_addr(m_addr), .m_write(m_write), .m_len(m_len),
         .m_wdata(m_wdata), .m_be(m_be), .m_rdata(m_rdata), .m_rvalid(m_rvalid));
     periph_mem_port mport (
-        .clk(clk),
+        .clk(clk), .rst(erst),
         .p_valid(m_valid), .p_ready(m_ready), .p_addr(m_addr), .p_write(m_write), .p_len(m_len),
         .p_wdata(m_wdata), .p_be(m_be), .p_rdata(m_rdata), .p_rvalid(m_rvalid),
-        .s_valid(mem_valid), .s_ready(mem_ready), .s_addr(mem_addr), .s_write(mem_write), .s_len(mem_len),
-        .s_wdata(mem_wdata), .s_be(mem_be), .s_rdata(mem_rdata), .s_rvalid(mem_rvalid));
+        .s_cmd_valid(mem_cmd_valid), .s_cmd_we(mem_cmd_we), .s_cmd_addr(mem_cmd_addr), .s_cmd_len(mem_cmd_len),
+        .s_wdata(mem_wdata), .s_wstrb(mem_wstrb), .s_cmd_ready(mem_cmd_ready), .s_wready(mem_wready),
+        .s_rdata(mem_rdata), .s_rvalid(mem_rvalid));
 
     assign irq = irq_en && irq_pend;
     wire [15:0] free = (16'd1 << FIFO_AW) - cf_count;
