@@ -136,8 +136,8 @@ end
 // ------------------------------------------------------------------ 74a side
     reg [2:0] start_s, treq_s;
     reg [1:0] st;
-    reg [1:0] tst;
-    initial begin fin_t_74 = 1'b0; tbl_ack_t_74 = 1'b0; st = 2'd0; tst = 2'd0; target_dataslot_read = 1'b0; end
+    reg [2:0] tst;
+    initial begin fin_t_74 = 1'b0; tbl_ack_t_74 = 1'b0; st = 2'd0; tst = 3'd0; target_dataslot_read = 1'b0; end
 
 always @(posedge clk_74a) begin
     start_s <= {start_s[1:0], start_t};
@@ -162,17 +162,19 @@ always @(posedge clk_74a) begin
 
     // size table reads (port A of mf_datatable, 2 clock read latency)
     case (tst)
-    2'd0: if (treq_s[2] ^ treq_s[1]) begin
+    3'd0: if (treq_s[2] ^ treq_s[1]) begin
         datatable_addr <= {4'd0, tbl_idx};    // stable while the request is pending
-        tst <= 2'd1;
+        tst <= 3'd1;
     end
-    2'd1: tst <= 2'd2;
-    2'd2: tst <= 2'd3;                        // mf_datatable: registered address and output
-    2'd3: begin
+    3'd1: tst <= 3'd2;                        // mf_datatable: registered address and output,
+    3'd2: tst <= 3'd3;                        // data valid 2 clocks after the address;
+    3'd3: tst <= 3'd4;                        // one spare clock
+    3'd4: begin
         tbl_q_74     <= datatable_q;
         tbl_ack_t_74 <= ~tbl_ack_t_74;
-        tst <= 2'd0;
+        tst <= 3'd0;
     end
+    default: tst <= 3'd0;
     endcase
 end
 

@@ -107,9 +107,9 @@ static inline uint64_t rdcycle64(void)
 {
     uint32_t hi, lo, hi2;
     do {
-        __asm__ volatile ("rdcycleh %0" : "=r"(hi));
-        __asm__ volatile ("rdcycle %0"  : "=r"(lo));
-        __asm__ volatile ("rdcycleh %0" : "=r"(hi2));
+        __asm__ volatile ("rdcycleh %0" : "=r"(hi) :: "memory");
+        __asm__ volatile ("rdcycle %0"  : "=r"(lo) :: "memory");
+        __asm__ volatile ("rdcycleh %0" : "=r"(hi2) :: "memory");
     } while (hi != hi2);
     return ((uint64_t)hi << 32) | lo;
 }

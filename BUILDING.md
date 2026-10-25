@@ -1,29 +1,29 @@
-# Building the UFO 50 Pocket core (milestone M1)
+# Building the UFO 50 Pocket core (milestone M3)
 
-This branch (`ufo50-m1`) turns Analogue's core template into the first stage of the
-UFO 50 port: a core called **UFO50** by **namdl0** that boots on the Analogue Pocket
-and shows a 384x216, 16:9 test pattern at 60 Hz. No game files are needed yet.
+This branch (`ufo50-m3`) turns the M1 test-pattern core into a small computer: a **VexRiscv RV32IMFD
+soft CPU** (16 KB + 16 KB caches, double-precision FPU) at 57.75 MHz, 64 MB SDRAM, a double-buffered
+384x216 RGB565 framebuffer, and data-slot loading. A C program ("hello") is built into the bitstream
+and shows the M3 exit test on screen. The memory map and peripheral contract is
+[`docs/MEMORY_MAP.md`](docs/MEMORY_MAP.md).
 
 The steps below assume Windows. Linux works the same way. Use `python3` instead
 of `py`, and `/media/...` instead of `E:\`.
 
-## What's in the branch
+## What's new in M3
 
 | Path | What it is |
 |---|---|
-| `src/fpga/ap_core.qpf` | Quartus project (Cyclone V 5CEBA4F23C8) |
-| `src/fpga/core/core_top.v` | Template top level. The video section now instantiates `ufo50_video` |
-| `src/fpga/core/ufo50_video.v` | **New**: 384x216 timing generator and test pattern |
-| `src/fpga/core/core_bridge_cmd.v` | Template host/target command handler (unchanged) |
-| `src/fpga/core/mf_pllbase*` | Template PLL (unchanged, see "Video timing") |
-| `dist/Cores/namdl0.UFO50/` | `core.json`, `video.json`, `data.json`, `input.json`, ..., `icon.bin`, `info.txt` |
-| `dist/Platforms/ufo50.json`, `dist/Platforms/_images/ufo50.bin` | Platform metadata and a placeholder text image |
-| `tools/pocket_pack.py` | Bit-reverses `.rbf` to `.rbf_r`, validates `dist/`, builds the SD tree and zip |
-| `sim/` | Icarus Verilog testbenches for the video module, plus IP stubs |
+| `src/fpga/core/cpu/VexRiscv.v` | Generated CPU (RV32IMFD, 16 KB 2-way I$/D$). `cpu/README.md`: configuration, licence, how to regenerate |
+| `src/fpga/core/soc/` | SoC: `ufo50_soc.v` (bus fabric, boot RAM, system registers), `sdram_ctrl.v` + `sdram_arb.v`, `vid_scanout.v`, `bridge_sdram.v` (APF -> SDRAM), `dataslot_ctrl.v` (target command 0x0180), `ufo50_blitter.v` / `ufo50_mixer.v` (M3 stubs, replaced in M4/M6) |
+| `src/fpga/core/mf_pllsys.v` | System PLL, 74.25 -> 57.75 MHz |
+| `src/fpga/core/fw/boot_b0..3.hex` | The hello firmware, preloaded into the 32 KB boot RAM by the bitstream |
+| `src/fpga/core/core_top.v` | Instantiates the SoC, drives the SDRAM pins, I2S from the mixer port |
+| `src/fpga/core/ufo50_video.v` | Same M1 timing; now also shows the framebuffer (or the M1 pattern, or a solid colour) |
+| `firmware/` | Bare-metal C: `common/` (crt0, link script, `soc.h`, text console, data-slot driver), `hello/main.c`, `Makefile` |
+| `sim/` | `sdram_model.v`, `tb_soc.v` (Icarus), `verilator/` (Verilator testbench, the one used for the full run) |
+| `tools/pocket_pack.py` | New: `testfile` / `crc` commands for the slot-0 test; checks slot addresses against the SDRAM map |
 
-`dist/` uses the same layout as the SD card (`Cores/<author>.<core>/`, `Platforms/`),
-the convention used by agg23's MIT-licensed cores such as
-[openfpga-pong](https://github.com/agg23/openfpga-pong).
+Video timing is unchanged from M1: 12.288 MHz pixel clock, 512 x 400 total, exactly 60 Hz.
 
 ## Video timing
 
@@ -61,35 +61,50 @@ Don't hand-edit the `mf_pllbase` files. They are generated, and the `.qip`, `.si
 
 ### 1. Install the tools (once)
 
-- **Intel Quartus Prime Lite Edition** with **Cyclone V** device support. The template
-  was made with 18.1. Newer Lite releases also work, but they may ask to upgrade
-  the PLL IP. If they do, accept the upgrade and keep the same settings.
+- **Intel Quartus Prime Lite Edition 25.1std** with **Cyclone V** device support (already on the dev PC).
 - **Python 3.8+** from python.org. Tick "Add to PATH". No extra packages are needed.
-- (Optional) Icarus Verilog for Windows if you want to re-run the simulations.
+- You do **not** need a RISC-V compiler: the firmware is already built into `src\fpga\core\fw\*.hex`.
+  To change the firmware, see "Rebuilding the firmware" below.
 
 ### 2. Get the branch
 
 ```
 git clone https://github.com/namdl0/core-template.git
 cd core-template
-git checkout ufo50-m1
+git checkout ufo50-m3
 ```
+(or `git fetch` and `git checkout ufo50-m3` in your existing clone)
 
 ### 3. Compile in Quartus
 
 1. Start Quartus. Choose **File > Open Project** and select `src\fpga\ap_core.qpf`.
 2. If a dialog offers to upgrade IP or the project's version, accept it.
-3. Choose **Processing > Start Compilation** (Ctrl+L). The first build takes a few minutes.
-4. When it finishes, check:
-   - The Messages pane has **0 errors**. Expect warnings: the template produces many.
-   - In the Compilation Report, under **Timing Analyzer**, nothing is red.
-     The video logic runs at 12.288 MHz, so timing should pass easily.
-   - `src\fpga\output_files\ap_core.rbf` has a new timestamp. Expect a size near
-     0.8 MB, the same as the template.
+3. Choose **Processing > Start Compilation** (Ctrl+L). Expect **15-40 minutes**: the CPU and FPU are much
+   bigger than M1.
+4. When it finishes, check and report back through the hub:
+   - The Messages pane has **0 errors**. Warnings are expected (truncation warnings from the generated CPU,
+     "no clock" warnings for the template's audio clock dividers, unconstrained-IO warnings).
+   - **Compilation Report > Fitter > Resource Section > Resource Usage Summary**: note "Logic utilization (in
+     ALMs)", "Total block memory bits", "Total RAM Blocks" and "Total DSP Blocks".
+   - **Timing Analyzer > Slow 1100mV 85C Model > Setup Summary**: the clock
+     `ic|mp2|altera_pll_i|general[0].gpll~PLL_OUTPUT_COUNTER|divclk` (57.75 MHz) must have a **positive slack**.
+     If it is red (negative), send the slack and the first lines of "Report Top Failing Paths". The fix is then a
+     lower clock (step 3a).
+   - `src\fpga\output_files\ap_core.rbf` has a new timestamp (~1-2 MB).
+   - Optional: **Compiler Report > Analysis & Synthesis > RAM Summary** should list the boot RAM
+     (`bram0`..`bram3`, 8192 x 8 each) with an initialization file `boot_b0.hex`..`boot_b3.hex`. If Quartus
+     warns that it cannot find a `.hex` file, the screen will stay on the M1 test pattern.
 
-SignalTap is turned **off** in this branch (`ENABLE_SIGNALTAP OFF` in `ap_core.qsf`).
-The template's `stp1.stp` probes `x_count`/`y_count` in `core_top`. Those signals moved
-into `ufo50_video`, and the probes are of no use without a JTAG cable anyway.
+#### 3a. If timing fails at 57.75 MHz
+
+In `src\fpga\core\core_top.v`, search for `SYS_FREQ_STR` and change both lines together, e.g. to
+
+```
+    localparam  SYS_FREQ_STR = "51.975000 MHz";
+    localparam  SYS_FREQ_HZ  = 32'd51_975_000;
+```
+(other exact values: `"49.500000 MHz"` / `32'd49_500_000`). Recompile. Nothing else changes; the
+firmware reads the clock from the hardware.
 
 ### 4. Package
 
@@ -99,50 +114,70 @@ From the repo root:
 py tools\pocket_pack.py package
 ```
 
-This command:
-- validates the JSON files against Analogue's limits (string lengths, slot ids and so on),
-- refuses to package if `ap_core.rbf` is still the template's original bitstream,
-  which means the compile didn't run,
-- bit-reverses `ap_core.rbf` into `Cores\namdl0.UFO50\bitstream.rbf_r`,
-- writes the SD tree to `build\sd\` and a zip,
-  `build\namdl0.UFO50_0.0.1_2026-10-24.zip`.
+It validates the JSON files, bit-reverses `ap_core.rbf` into `Cores\namdl0.UFO50\bitstream.rbf_r`, writes the
+SD tree to `build\sd\` and a zip `build\namdl0.UFO50_0.3.0_2026-10-25.zip`. Add `--sd E:\` to copy the
+tree straight onto the SD card.
 
-To copy the tree straight onto the SD card, add `--sd`, for example
-`py tools\pocket_pack.py package --sd E:\`.
+### 5. (Optional) a test file for the data-slot check
 
-To bit-reverse a file by hand: `py tools\pocket_pack.py reverse in.rbf out.rbf_r`.
-
-### 5. Copy to the SD card
-
-If you didn't use `--sd`, extract the zip onto the **root** of the Pocket's SD card. You should end up with:
+The hello test computes a CRC32 of the slot 0 file (`ufo50.gmp`) and re-reads its first 4 KB with target
+command 0x0180. Any file works. To use a known file:
 
 ```
-E:\Cores\namdl0.UFO50\bitstream.rbf_r
-E:\Cores\namdl0.UFO50\core.json  (and the other .json files, icon.bin, info.txt)
+py tools\pocket_pack.py testfile E:\Assets\ufo50\common\ufo50.gmp --size 4M
+```
+It prints the CRC32 the screen should show. For an existing file, `py tools\pocket_pack.py crc <file>`.
+Without a file the core still boots (all slots are optional).
+
+### 6. Copy to the SD card
+
+If you didn't use `--sd`, extract the zip onto the **root** of the Pocket's SD card:
+
+```
+E:\Cores\namdl0.UFO50\bitstream.rbf_r   (+ the .json files, icon.bin, info.txt)
 E:\Platforms\ufo50.json
 E:\Platforms\_images\ufo50.bin
+E:\Assets\ufo50\common\ufo50.gmp         (optional, step 5)
 ```
 
-Eject the card safely and put it back in the Pocket.
+### 7. What you should see on the Pocket (M3 exit test)
 
-### 6. What you should see on the Pocket
+**openFPGA > UFO 50 > UFO50.** If you put a `ufo50.gmp` in place, the Pocket may first show a file
+browser for it (choose it) and a short loading bar.
 
-**openFPGA > UFO 50 > UFO50.** The core starts straight away, with no file browser,
-because every data slot is optional for M1. On screen:
+1. For a split second the **M1 test pattern** (colour bars), then a **dark blue screen with text**. If it stays
+   on the colour bars, the CPU did not start: report it.
+2. The text, top to bottom (numbers are examples):
+   ```
+   UFO50 Pocket SoC - M3 hello
+   CPU  VexRiscv RV32IMFD  57.750 MHz
+        I$ 16K 2-way  D$ 16K 2-way  FPU F+D
+        measured 57.750 MHz (rdcycle 57.750)
+   SLOT 0:4194304
+        slot0 crc32 1A2B3C4D  1.30 s
+        0x0180 read 4096 B: PASS
+   SDRAM init PASS  bus PASS
+        65024 KB march             PASS 12.3 s
+   BW   wr xx.x MB/s rd xx.x MB/s
+        cpy xx.x MB/s  sum ok
+   FPU  sum 1/i^2 1.644924067  xx cyc/it
+        fma 47581.313603 xx cyc  sqrt xx cyc
+        double results PASS
+   PERIPH blit PASS  mixer PASS
+   ```
+   - "measured" comes from counting clocks over 60 video frames: it must match the nominal clock.
+   - With no file: `SLOT no files (all slots optional)` and `slot0: no file, CRC skipped`.
+   - The SDRAM test covers all 63.5 MB below the framebuffers and takes several seconds; a progress counter
+     runs at the right of its line. Any **FAIL** shows the failing address: report it.
+   - A red line `TRAP mcause ... mepc ...` at the bottom means the CPU crashed: report the numbers.
+3. At the bottom, a live area: `Frame N` counting at 60 per second, the `cont1_key` value, and the button
+   names (UP DN LT RT A B X Y L1 R1 L2 R2 L3 R3 SE ST) highlighted in yellow while held, plus an orange block
+   sliding smoothly left to right (cyan while A is held). Smooth motion without tearing shows the
+   double-buffered framebuffer swap works.
+4. **Dock:** the same at 16:9 on the TV. Audio: silence (the mixer is a stub).
 
-- 8 colour bars (white, yellow, cyan, green, magenta, red, blue, black) across the
-  top two thirds, a grey ramp under them, then a fine 1x1 checkerboard (left) and a
-  2x2 checkerboard (right) at the bottom.
-- A **1-pixel white border on the very edge** of the picture with a **red ring** just
-  inside it. If the white is visible on all four sides, the 384x216 window is
-  exactly aligned and nothing is cropped.
-- An orange 24x24 box bouncing around.
-- Buttons: hold **A** to turn the box cyan, **B** to freeze it, **Select** for
-  greyscale, **Start** to invert the colours.
-- The picture fills the width of the screen at 16:9, with bars above and below.
-  It's normal for the 1x1 checkerboard to shimmer or show moiré, because 384 to the
-  panel width is not an integer scale.
-- **Dock:** the same pattern at 16:9 on the TV.
+Please report: everything on screen (a photo is ideal), the Quartus resource and timing numbers from step 3,
+and the slot0 CRC versus the one `pocket_pack.py` printed.
 
 ### Troubleshooting
 
@@ -150,41 +185,53 @@ because every data slot is optional for M1. On screen:
 |---|---|
 | Core missing from the list | Folder isn't `Cores\namdl0.UFO50`, or `core.json` is invalid. Run `py tools\pocket_pack.py validate` |
 | Pocket says it can't load the bitstream | `bitstream.rbf_r` isn't bit-reversed or is from a failed build. Repackage |
-| Black screen, core seems to hang | `reset_n` never released. Check that `core_bridge_cmd.v` is in the project and the compile had no errors |
-| Picture shifted or edge cut off | Report which border colour is missing on which side |
+| Stays on the M1 colour bars | CPU not running: boot RAM `.hex` not found by Quartus (check warnings), or timing failure |
+| Black screen | `reset_n` never released, or the PLL failed: check the compile had no errors |
+| Text but garbled / wrong colours / SDRAM FAIL | SDRAM timing on the real board: report the screen and failing address |
+| Picture shifted or edge cut off | Report which border colour is missing on which side (VID_CTRL test pattern) |
+
+### Rebuilding the firmware (optional, Linux or WSL)
+
+```
+tools/fetch_rv32_toolchain.sh            # from the ufo50-ap repo: xPack riscv-none-elf-gcc 14.2.0-3
+make -C firmware                         # writes src/fpga/core/fw/boot_b0..3.hex
+```
+Then recompile in Quartus (Quartus picks up the new `.hex` files; if it doesn't, use
+**Processing > Update Memory Initialization File** and then **Processing > Start > Start Assembler**).
 
 ## Simulation (optional)
 
 ```
-sh sim/run_sim.sh            # needs iverilog/vvp on PATH
+sh sim/run_sim.sh            # M1 video tests (Icarus Verilog)
+sh sim/verilator/run.sh      # M3 SoC: firmware boots, draws the framebuffer, frames compared (Verilator 5)
 ```
 
-The script runs three checks:
-- `tb_ufo50_video.v` runs 6 frames and checks the VS period (204,800 clocks), 400 HS per
-  frame, 216 DE lines of exactly 384 pixels, no HS or VS during DE, RGB = 0 outside
-  DE, `skip` = 0, the border and ring pixels, and the A and B button effects. It
-  writes `sim/frame1.ppm` and `sim/frame3.ppm`, which open in GIMP or IrfanView.
-- `tb_box_bounce.v` runs 2,000 frames and checks that the box stays inside 384x216
-  and bounces off all four edges.
-- An elaboration of `core_top` + `core_bridge_cmd` + `ufo50_video` against stub IP.
+`sim/verilator/run.sh` builds the `-DSIM` firmware (smaller tests), Verilates the SoC with the CPU, and runs it
+with a cycle-based SDRAM model that checks SDRAM timing, an emulated APF (slot 0 loaded over the bridge
+during reset, the data-slot size table, target command 0x0180) and the real video timing. It writes the
+displayed frames to `sim/out/vl_frame_NN.ppm` and compares every frame of the live loop pixel by pixel with the
+framebuffer in SDRAM. It ends with `TB_SOC PASS`. `sim/tb_soc.v` is the same test for Icarus Verilog
+(`iverilog -g2012`), with a timing-accurate SDRAM model, but it runs at ~2k CPU cycles per second, so it only
+gets through the boot in reasonable time.
 
 ## Data slots (`data.json`)
 
-These follow the plan in CORE_PREP.md. For M1 every slot is `required: false`, so
-the core boots with no files. The addresses are provisional and will be fixed when
-the SDRAM loader exists (M3).
+For M3 every slot is still `required: false`, so the core boots with no files. Slots with an `address` are
+written by the APF over the bridge into SDRAM **before** the core leaves reset (the SDRAM controller and the
+bridge path keep running during reset). Bridge address = CPU address (`docs/MEMORY_MAP.md`).
 
 | id | name | file | mode |
 |---|---|---|---|
-| 0 | Program | `ufo50.gmp` | loaded to 0x00000000 (SDRAM), max 40 MB |
-| 1 | Asset Index | `ufo50.gma` | loaded to 0x02800000, max 8 MB |
-| 2 | Texture Pack | `ufo50_tex.bin` | `deferload` (core reads it with target command 0x0180) |
+| 0 | Program | `ufo50.gmp` | loaded to **0x10000000** (SDRAM), max 40 MB |
+| 1 | Asset Index | `ufo50.gma` | loaded to **0x12800000**, max 8 MB |
+| 2 | Texture Pack | `ufo50_tex.bin` | `deferload`: the CPU reads it with target command 0x0180 (`ds_read()`) |
 | 3 | Audio Pack | `ufo50_snd.bin` | `deferload` |
-| 4 | Text | `english.txt` | loaded to 0x03000000, max 1 MB |
-| 10-12 | Save 1-3 | `save1.ufo` .. `save3.ufo` | nonvolatile, 64 KB each, 0x20000000+ |
-| 13 | Account | `account.ufo` | nonvolatile |
-| 14 | Config | `config.json` | nonvolatile, 4 KB |
+| 4 | Text | `english.txt` | loaded to **0x13000000**, max 1 MB |
+| 10-12 | Save 1-3 | `save1.ufo` .. `save3.ufo` | nonvolatile, 64 KB each, bridge 0x20000000+ (not wired yet, M7) |
+| 13 | Account | `account.ufo` | nonvolatile (M7) |
+| 14 | Config | `config.json` | nonvolatile, 4 KB (M7) |
 
 Asset files go in `/Assets/ufo50/common/` and saves in `/Saves/ufo50/common/`, the
-platform-shared locations (parameters bit 1 is clear). The M1 core ignores bridge
-writes and returns 0 on reads outside `0xF8xxxxxx`.
+platform-shared locations (parameters bit 1 is clear). Bridge reads (needed by the APF to write
+nonvolatile slots back to the SD card) return 0 in M3, so **don't put real save files in
+`/Saves/ufo50/` yet**.

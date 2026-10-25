@@ -509,7 +509,9 @@ end
     wire        ds_irq_pulse;
     wire        blit_irq, mix_irq;
 
-    assign timer_irq = (mtime >= mtimecmp);
+    reg timer_irq_r;                          // registered: 64-bit compare off the CPU path
+    always @(posedge clk_sys) timer_irq_r <= (mtime >= mtimecmp);
+    assign timer_irq = timer_irq_r;
     assign ext_irq   = |({mix_irq, blit_irq, irq_pend[4], irq_pend[1:0]} & {irq_en[3], irq_en[2], irq_en[4], irq_en[1:0]});
 
     reg         sys_ack_r;

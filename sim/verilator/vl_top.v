@@ -42,7 +42,11 @@ module vl_top (
     output wire [1:0]   v_mode,
     output wire         dbg_wr,
     output wire [31:0]  dbg_val,
-    output wire [31:0]  fb_active
+    output wire [31:0]  fb_active,
+    output wire         dbg_dline,     // D$ line refill command accepted
+    output wire         dbg_drsp_last, // last beat of a D$ response
+    output wire         dbg_iline,
+    output wire         dbg_irsp
 );
     reg rst_sys = 1'b1;
     always @(posedge clk_sys) rst_sys <= rst_mem | ~reset_n;
@@ -77,5 +81,9 @@ module vl_top (
     assign dbg_wr    = soc.m_cyc & soc.m_we & (soc.m_adr == 30'h2000_03FF) & soc.sys_ack;
     assign dbg_val   = soc.m_dat_w;
     assign fb_active = soc.fb_active;
+    assign dbg_dline     = soc.dBus_cmd_valid & soc.dBus_cmd_ready & ~soc.dBus_cmd_payload_wr & (soc.dBus_cmd_payload_size == 3'd5);
+    assign dbg_drsp_last = soc.dBus_rsp_valid & soc.dBus_rsp_payload_last;
+    assign dbg_iline     = soc.iBus_cmd_valid & soc.iBus_cmd_ready;
+    assign dbg_irsp      = soc.iBus_rsp_valid;
 endmodule
 `default_nettype wire

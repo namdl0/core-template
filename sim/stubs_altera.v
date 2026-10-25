@@ -64,3 +64,25 @@ module mf_datatable (
         q_b <= mem[address_b];
     end
 endmodule
+
+// M3: system PLL (57.75 MHz) and DDIO clock output
+module mf_pllsys #(parameter OUT_FREQ = "57.750000 MHz") (
+    input  wire refclk,
+    input  wire rst,
+    output reg  outclk_0 = 1'b0,
+    output reg  locked = 1'b0
+);
+    // synthesis translate_off
+    always #8658 outclk_0 = ~outclk_0;
+    initial #1000000 locked = 1'b1;
+    // synthesis translate_on
+endmodule
+
+module pin_ddio_clk (
+    input  wire datain_h,
+    input  wire datain_l,
+    input  wire outclock,
+    output wire dataout
+);
+    assign dataout = outclock ? datain_h : datain_l;
+endmodule

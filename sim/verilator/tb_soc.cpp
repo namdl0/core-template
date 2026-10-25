@@ -166,7 +166,7 @@ int main(int argc, char **argv) {
     bool loaded = false, released = false;
     int t_state = 0, t_wait = 0;
     bool t_read_prev = false;
-    uint32_t dt_q1 = 0, dt_q2 = 0, dt_addr_r = 0;
+    uint32_t dt_q1 = 0, dt_addr_r = 0;
     int n0180 = 0;
 
     // video
@@ -187,6 +187,9 @@ int main(int argc, char **argv) {
     double t = 0, n_sys = T_SYS / 2, n_vid = T_VID / 2, n_74 = T_74A / 2;
     double next_report = 10e9;
     long sys_cycles = 0;
+    long d_start = 0, d_lat = 0, d_n = 0, i_start = 0, i_lat = 0, i_n = 0;
+    int i_beats = 0;
+    bool d_open = false, i_open = false;
 
     while (!done && t < max_ms * 1e9) {
         t = std::min(n_sys, std::min(n_vid, n_74));
@@ -206,6 +209,11 @@ int main(int argc, char **argv) {
                 top->clk_sys = 1;
                 top->eval();
                 sys_cycles++;
+                // D$ line refill latency (command accepted -> last beat), I$ refill (cmd -> 8th beat)
+                if (top->dbg_dline) { d_start = sys_cycles; d_open = true; }
+                if (d_open && top->dbg_drsp_last) { d_lat += sys_cycles - d_start; d_n++; d_open = false; }
+                if (top->dbg_iline) { i_start = sys_cycles; i_beats = 0; i_open = true; }
+                if (i_open && top->dbg_irsp && ++i_beats == 8) { i_lat += sys_cycles - i_start; i_n++; i_open = false; }
                 if (top->dbg_wr) {
                     marker = top->dbg_val;
                     if ((marker >> 16) == 0xDEAD) {
@@ -231,23 +239,7 @@ int main(int argc, char **argv) {
                             for (uint32_t p : cap) { fputc(p >> 16, f); fputc((p >> 8) & 255, f); fputc(p & 255, f); }
                             fclose(f);
                         }
-                        if (cmp_this) {
-                            cmp_frames++;
-                            uint32_t base = fb_at_start & 0x3FFFFFF;
-                            for (int a = 0; a < 384 * 216; a++) {
-                                uint16_t px = sd.hw(base + 2 * a);
-                                uint32_t r = (px >> 11) & 31, g = (px >> 5) & 63, b = px & 31;
-                                uint32_t e = ((r << 3 | r >> 2) << 16) | ((g << 2 | g >> 4) << 8) | (b << 3 | b >> 2);
-                                if (e != cap[a]) {
-                                    if (mismatches < 10)
-                                        printf("pixel mismatch frame %d (%d,%d): got %06x want %06x\n",
-                                               frame_no, a % 384, a / 384, cap[a], e);
-                                    mismatches++;
-                                }
-                            }
-                            printf("[%.3f ms] frame %d (buffer %08x) compared: %ld mismatches so far\n",
-                                   t / 1e9, frame_no, fb_at_start, mismatches);
-                        } else
+                        if (!cmp_this)
                             printf("[%.3f ms] frame %d captured (%s)\n", t / 1e9, frame_no, fn);
                         frame_no++;
                         if (live >= 3 && cmp_frames >= 2) done = true;
@@ -258,6 +250,26 @@ int main(int argc, char **argv) {
                 if (top->v_de && captured < 384 * 216) {
                     if (captured == 0) { fb_at_start = top->fb_active; cmp_this = (marker == 7) || live > 0; }
                     cap[captured++] = top->v_rgb;
+                    // compare at the last active pixel: in vertical blank the firmware may already
+                    // draw into this buffer again (it is the next back buffer)
+                    if (captured == 384 * 216 && cmp_this) {
+                        cmp_frames++;
+                        uint32_t base = fb_at_start & 0x3FFFFFF;
+                        long before = mismatches;
+                        for (int a = 0; a < 384 * 216; a++) {
+                            uint16_t px = sd.hw(base + 2 * a);
+                            uint32_t r = (px >> 11) & 31, g = (px >> 5) & 63, b = px & 31;
+                            uint32_t e = ((r << 3 | r >> 2) << 16) | ((g << 2 | g >> 4) << 8) | (b << 3 | b >> 2);
+                            if (e != cap[a]) {
+                                if (mismatches < 10)
+                                    printf("pixel mismatch frame %d (%d,%d): got %06x want %06x\n",
+                                           frame_no, a % 384, a / 384, cap[a], e);
+                                mismatches++;
+                            }
+                        }
+                        printf("[%.3f ms] frame %d (buffer %08x) compared with SDRAM: %ld mismatches\n",
+                               t / 1e9, frame_no, fb_at_start, mismatches - before);
+                    }
                 }
             }
         }
@@ -267,9 +279,10 @@ int main(int argc, char **argv) {
             top->eval();
             if (top->clk_74a) {
                 // datatable: registered address + registered output
-                top->dt_q = dt_q2;
-                dt_q2 = dt_q1;
+                // edge E0: address changes; E1: address register; E2: output register -> q seen at E3
+                top->dt_q = dt_q1;
                 dt_q1 = (dt_addr_r == 1) ? (uint32_t)slot0.size() : 0;
+                if (getenv("DT_DEBUG") && top->dt_addr != dt_addr_r) printf("[%.3f ms] dt_addr %u\n", t / 1e9, top->dt_addr);
                 dt_addr_r = top->dt_addr;
                 // bridge writes
                 top->bridge_wr = 0;
@@ -325,6 +338,8 @@ int main(int argc, char **argv) {
     printf("SDRAM model: %ld errors, %ld reads, %ld writes, %ld refreshes\n", sd.errors, sd.reads, sd.writes, sd.refs);
     printf("frames compared %d, pixel mismatches %ld, live frames %u, 0x0180 commands %d, sim time %.2f ms\n",
            cmp_frames, mismatches, live, n0180, t / 1e9);
+    printf("D$ line refills %ld, avg %.1f cycles; I$ line refills %ld, avg %.1f cycles (incl. boot RAM)\n",
+           d_n, d_n ? (double)d_lat / d_n : 0.0, i_n, i_n ? (double)i_lat / i_n : 0.0);
     bool pass = !trapped && sd.errors == 0 && mismatches == 0 && cmp_frames >= 2 && live >= 3 && n0180 >= 1;
     printf(pass ? "TB_SOC PASS\n" : "TB_SOC FAIL\n");
     top->final();

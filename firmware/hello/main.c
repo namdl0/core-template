@@ -106,19 +106,19 @@ static int mem_test(uint32_t base, uint32_t bytes, uint32_t *fail_addr, int row)
 }
 
 /* ------------------------------------------------------------------ FPU benchmark */
-static double __attribute__((noinline)) bench_basel(int n)
+static double __attribute__((noipa)) bench_basel(int n)
 {
     double s = 0.0;
     for (int i = 1; i <= n; i++) { double d = (double)i; s += 1.0 / (d * d); }
     return s;
 }
-static double __attribute__((noinline)) bench_fma(int n)
+static double __attribute__((noipa)) bench_fma(int n)
 {
     double x = 0.0, a = 0.999999, b = 0.5;
     for (int i = 0; i < n; i++) x = __builtin_fma(x, a, b);
     return x;
 }
-static double __attribute__((noinline)) bench_sqrt(int n)
+static double __attribute__((noipa)) bench_sqrt(int n)
 {
     double s = 0.0;
     for (int i = 0; i < n; i++) s += __builtin_sqrt((double)i);
@@ -185,7 +185,7 @@ int main(void)
     /* ---- CPU */
     uint32_t cfg = SYS_CONFIG, misa = read_misa();
     label("CPU  "); con_puts("VexRiscv RV32");
-    for (int i = 0; i < 26; i++) if (misa & (1u << i)) con_putc('A' + i);
+    for (const char *e = "IEMAFDQCBV"; *e; e++) if (misa & (1u << (*e - 'A'))) con_putc(*e);   /* canonical order */
     con_puts("  ");
     con_fixed(clk_hz / 1e6, 3); con_puts(" MHz\n");
     label("     "); con_puts("I$ "); con_dec(cfg & 0xFF); con_puts("K "); con_dec((cfg >> 16) & 15);
@@ -197,9 +197,9 @@ int main(void)
         uint64_t t0 = mtime64(), c0 = rdcycle64();
         for (int i = 0; i < CLK_FRAMES; i++) wait_vblank();
         uint64_t t1 = mtime64(), c1 = rdcycle64();
-        con_fixed((double)(t1 - t0) * 60.0 / CLK_FRAMES / 1e6, 3);
+        con_fixed((double)(t1 - t0) * 60.0 / (CLK_FRAMES ? CLK_FRAMES : 1) / 1e6, 3);
         con_puts(" MHz (rdcycle ");
-        con_fixed((double)(c1 - c0) * 60.0 / CLK_FRAMES / 1e6, 3);
+        con_fixed((double)(c1 - c0) * 60.0 / (CLK_FRAMES ? CLK_FRAMES : 1) / 1e6, 3);
         con_puts(")\n");
     } else con_puts("(skipped)\n");
     DEBUG_OUT = 0x00000002u;
