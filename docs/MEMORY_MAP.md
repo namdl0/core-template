@@ -1,6 +1,6 @@
 # UFO50 Pocket SoC: memory map and peripheral contract (M3)
 
-Status: **draft v0.1** (2026-10-25), branch `ufo50-m3`. This file is the contract between the SoC
+Status: **v0.2** (2026-10-25, implemented and simulated), branch `ufo50-m3`. This file is the contract between the SoC
 (CPU, SDRAM, video, data slots: branch `ufo50-m3`), the blitter and audio mixer (branch `ufo50-periph`)
 and the runtime port (`platform_pocket.c`). Changes to the port definitions in sections 4 and 5 are
 listed in the changelog at the end.
@@ -105,12 +105,14 @@ selected lanes (sel). Undefined offsets read 0.
 | `0x060` | `RTC_EPOCH` | R | `rtc_epoch_seconds` from the APF (valid when `RTC_VALID`=1) |
 | `0x064` | `RTC_VALID` | R | bit 0 |
 | `0x070` | `OS_STATUS` | R | bit 0 `osnotify_inmenu` (Pocket menu open), bit 1 `dataslot_allcomplete` |
-| `0x100` | `VID_STATUS` | R | bit 0 in vblank, bit 1 = buffer swap pending, `[25:16]` current line (0..399, 16 = first active) |
+| `0x100` | `VID_STATUS` | R | bit 0 in vblank, bit 1 = buffer swap pending, `[23:16]` last framebuffer line fetched by the scanout (0..215) |
 | `0x104` | `VID_FRAME` | R | frame counter, +1 at each vblank start |
 | `0x108` | `FB_ADDR` | RW | Address of the **front buffer** (CPU byte address in `0x1000_0000`+, 256-byte aligned). The written value takes effect at the next vblank start (`VID_STATUS` bit 1 is set until then). Reset `0x13F8_0000`. |
 | `0x10C` | `FB_ACTIVE` | R | address currently scanned out |
-| `0x110` | `VID_CTRL` | RW | bit 0 scanout enable (0 = output black; reset 0, firmware sets 1 after clearing the buffer), bit 1 test pattern (M1 pattern instead of the framebuffer) |
-| `0x114` | `VID_BORDER` | RW | RGB888 colour output when scanout is disabled |
+| `0x110` | `VID_CTRL` | RW | bit 1 = M1 test pattern (wins over bit 0), bit 0 = framebuffer scanout; both 0 = solid `VID_BORDER` colour. **Reset value 2 (test pattern)**: if the Pocket shows the M1 pattern, the firmware never started |
+| `0x114` | `VID_BORDER` | RW | RGB888 colour shown when `VID_CTRL` = 0 |
+| `0x120` | `SDRAM_STATUS` | R | bit 0 = SDRAM controller initialised |
+| `0xFFC` | `DEBUG_OUT` | W | ignored by the hardware; the firmware writes progress markers here, which the simulation testbenches (and SignalTap) watch |
 
 ### 3.2 Data-slot controller, base `0x8001_0000`
 
@@ -133,7 +135,10 @@ Lengths and offsets: any multiple of 4 is safe; the APF handles the rest.
 
 ## 4. Peripheral slave windows (blitter, mixer): Wishbone B4 classic, 32-bit
 
-One port per peripheral, in `clk_sys`. The SoC decodes the 64 KB window and drives:
+One port per peripheral, in `clk_sys`. The peripherals are the modules **`ufo50_blitter`**
+(`src/fpga/core/soc/ufo50_blitter.v`) and **`ufo50_mixer`** (`src/fpga/core/soc/ufo50_mixer.v`). In M3 both files
+are stubs; branch `ufo50-periph` replaces the two files and keeps the module names and port lists below
+(instantiated in `soc/ufo50_soc.v`). The SoC decodes the 64 KB window and drives:
 
 ```verilog
 // SoC -> peripheral
@@ -148,8 +153,15 @@ input  wire        wb_stb,       // cyc & stb = request; held until ack
 // peripheral -> SoC
 output wire [31:0] wb_dat_r,     // valid in the ack cycle
 output wire        wb_ack,       // one cycle per transfer; may be delayed (wait states allowed)
-output wire        irq           // level, high = interrupt pending (IRQ bits 2 / 3)
+output wire        irq,          // level, high = interrupt pending (IRQ bits 2 / 3)
+// SDRAM master port: section 5 (mem_cmd_valid ... mem_rvalid)
+output wire        present       // tie to 1 in the real peripheral (SYS_CONFIG bits 25 / 26)
 ```
+
+`wb_cyc` and `wb_stb` are the same signal (window selected). Full port order of both modules: `clk, rst,
+wb_adr, wb_dat_w, wb_sel, wb_we, wb_cyc, wb_stb, wb_dat_r, wb_ack, irq, mem_cmd_valid, mem_cmd_we,
+mem_cmd_addr, mem_cmd_len, mem_wdata, mem_wstrb, mem_cmd_ready, mem_wready, mem_rdata, mem_rvalid,
+[mixer only: audio_tick, audio_l, audio_r,] present`. Connect by name.
 
 Rules: classic single transfers only (no `cti`/`bte`, no `err`/`rty`). The SoC keeps `cyc`/`stb` and all
 inputs stable until `ack`, then drops `stb` for at least one cycle. `ack` must be asserted only while
@@ -171,7 +183,8 @@ the master port (src at `0x24`, dst at `0x28`; `0x20` reads 1 while busy), irq =
 
 ## 5. SDRAM master ports (blitter `X0`, mixer `X1`)
 
-Two identical extra masters on the SDRAM arbiter, in `clk_sys`:
+Two identical extra masters on the SDRAM arbiter, in `clk_sys` (blitter = arbiter port 5 "X0",
+mixer = port 2 "X1"). `periph_stub.v` is a small working example of both interfaces:
 
 ```verilog
 // master -> arbiter
@@ -202,7 +215,10 @@ Protocol:
   last `wready` (write) or the last `rvalid` (read). Holding `valid` early is fine.
 - Typical cost: a closed-page access is ~8 `clk_sys` cycles + 2 per beat; 8 beats (32 B) ~ 24 cycles.
 - Arbitration (fixed priority, may be tuned; not part of the contract): video scanout > bridge (APF) >
-  `X1` mixer > CPU D-bus > CPU I-bus > `X0` blitter. A master must not assume a bound on `ready`
+  `X1` mixer > CPU D-bus > CPU I-bus > `X0` blitter. `mem_rdata` is shared by all ports: it is only
+  meaningful in a cycle where your own `mem_rvalid` is high.
+- The CPU's D$ is not snooped. After the blitter writes memory the CPU will read (rare: the framebuffer is
+  write-only for the CPU), the CPU invalidates its D$ or reads through `0x5xxx_xxxx`. A master must not assume a bound on `ready`
   latency, but video takes at most ~10% of SDRAM time and a CPU burst is <= 32 B.
 - Peak bandwidth: 16-bit SDR at 57.75 MHz = 115 MB/s raw; ~75-90 MB/s for 32-byte bursts.
 
@@ -219,11 +235,41 @@ Protocol:
 
 ## 7. CPU configuration
 
-VexRiscv (SpinalHDL, MIT), single core, RV32IMFD (+Zicsr), ilp32d, machine mode only. See
-`rtl/cpu/README.md` for the exact generator configuration, cache sizes and how to regenerate.
+VexRiscv (SpinalHDL, MIT), single core, RV32IMFD (+Zicsr, Zifencei), ilp32d, machine mode only, 16 KB 2-way
+I$ and D$ (32-byte lines, D$ write-through, 64-bit data path), 57.75 MHz. See `src/fpga/core/cpu/README.md`
+for the exact generator configuration and how to regenerate.
 Toolchain flags: `-march=rv32imfd_zicsr_zifencei -mabi=ilp32d`.
-`rdcycle`/`rdcycleh`, `rdinstret` work. D$ invalidate: `dcache_invalidate()`; I$ invalidate: `fence.i`.
+`rdcycle`/`rdcycleh`, `rdinstret` work. D$ invalidate: `dcache_invalidate()` (instruction `0x0000500F`);
+I$ invalidate: `fence.i`. The FPU must be enabled before use (`mstatus.FS`, done in `crt0.S`).
+
+## 8. Notes for the runtime port (`platform_pocket.c`)
+
+- **Toolchain**: xPack `riscv-none-elf-gcc` 14.2.0-3, `-march=rv32imfd_zicsr_zifencei -mabi=ilp32d`. The
+  newlib multilib `rv32imfd_zicsr/ilp32d` matches. Starting point: `firmware/common/` (crt0, link script,
+  `soc.h`, `dataslot.c`, text console).
+- **Where code runs**: the boot RAM is only 32 KB. The runtime (~600 KB `.text`, ~5 MB `.bss`) must run from
+  SDRAM. Plan: a small boot RAM loader reads the runtime ELF/binary from a data slot (or it is part of slot 0)
+  into SDRAM, invalidates the I$ (`fence.i`) and jumps. Linker script: `.text/.data/.bss` in SDRAM above the
+  slot data, e.g. from `0x1310_0000`; stack at the top of the heap region (below `0x13F0_0000`).
+- **Heap**: whatever is left between the end of `.bss` and `0x13F0_0000` (~14 MB with the default slot layout).
+  Slot 0 (`.gmp`, up to 40 MB) and slot 1 (`.gma`, 8 MB) are already in memory at boot: parse them in place,
+  don't copy. 64 MB cannot hold the PC build's 70 MB resident heap; texture pages go to PSRAM in M4.
+- **Files**: slots loaded at boot are plain memory (`0x1000_0000`, `0x1280_0000`, `0x1300_0000`; sizes from
+  `ds_slot_size()`). Deferload slots (2 texture pack, 3 audio pack) are read with `ds_read(id, offset, dst, len)`;
+  `ds_read_start()`/`ds_busy()` allow overlapping the transfer with other work. The bridge delivers a few MB/s.
+  Saves (slots 10-14) need data-slot writes (0x0184) and bridge reads of SDRAM: not in M3.
+- **Time**: `rdcycle` (57.75 MHz) or `MTIME` (same clock, 64-bit). Frame pacing: `wait_vblank()` or the VBLANK
+  IRQ; the video is exactly 60.000 Hz.
+- **Video**: draw RGB565 into the back buffer, write `FB_ADDR`, wait for `VID_STATUS.SWAP_PEND` = 0.
+  CPU stores to the framebuffer are slow (one SDRAM write each, ~10 cycles): M4's blitter does the drawing.
+- **Input**: `CONT_KEY(0..3)` (bit map in section 3.1), `CONT_JOY`, `CONT_TRIG`.
+- **Coherency**: after `ds_read()` the driver already invalidates the D$. Self-modifying code / loaded code
+  needs `fence.i`.
 
 ## Changelog
 
 - v0.1 (2026-10-25): first draft.
+- v0.2 (2026-10-25): matches the implementation. **No change to the peripheral ports of sections 4-5**, only
+  additions: module/file names `ufo50_blitter`/`ufo50_mixer`, a `present` output, and the arbiter port numbers.
+  Registers: `VID_STATUS[23:16]` is the last fetched line (was "current line"); `VID_CTRL` reset value is 2
+  (test pattern); new `SDRAM_STATUS` (0x120) and `DEBUG_OUT` (0xFFC); section 8 (runtime notes) added.

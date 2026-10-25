@@ -4,11 +4,11 @@
         "metadata": {
             "platform_ids": ["ufo50"],
             "shortname": "UFO50",
-            "description": "UFO 50 runtime port (WIP). M1: 384x216 video test pattern.",
+            "description": "UFO 50 runtime port (WIP). M3: RISC-V SoC hello test.",
             "author": "namdl0",
             "url": "https://github.com/namdl0/core-template",
-            "version": "0.0.1",
-            "date_release": "2026-10-24"
+            "version": "0.3.0",
+            "date_release": "2026-10-25"
         },
         "framework": {
             "target_product": "Analogue Pocket",

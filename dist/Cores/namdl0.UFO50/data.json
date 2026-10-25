@@ -10,7 +10,7 @@
                 "extensions": ["gmp"],
                 "filename": "ufo50.gmp",
                 "size_maximum": "0x02800000",
-                "address": "0x00000000"
+                "address": "0x10000000"
             },
             {
                 "name": "Asset Index",
@@ -20,7 +20,7 @@
                 "extensions": ["gma"],
                 "filename": "ufo50.gma",
                 "size_maximum": "0x00800000",
-                "address": "0x02800000"
+                "address": "0x12800000"
             },
             {
                 "name": "Texture Pack",
@@ -48,7 +48,7 @@
                 "extensions": ["txt"],
                 "filename": "english.txt",
                 "size_maximum": "0x00100000",
-                "address": "0x03000000"
+                "address": "0x13000000"
             },
             {
                 "name": "Save 1",

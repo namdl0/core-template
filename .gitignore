@@ -4,3 +4,8 @@ sim/*.vvp
 sim/*.vcd
 __pycache__/
 *.pyc
+
+# M3 generated outputs
+sim/out/
+sim/fw/
+firmware/build/

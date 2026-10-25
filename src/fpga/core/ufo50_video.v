@@ -41,6 +41,12 @@
 //   Select (bit 14) greyscale output
 //   Start  (bit 15) invert colours
 //
+// M3 (EXT = 1): the module also exports its counters (hcount/vcount) for the
+// framebuffer scanout and selects the output source with src_mode (any clock
+// domain, quasi-static): 0 = border_rgb, 1 = fb_rgb (framebuffer pixel for the
+// current counters), 2/3 = the M1 test pattern above. With EXT = 0 (default) the
+// new inputs are ignored and the module behaves exactly as in M1.
+//
 
 `default_nettype none
 
@@ -52,7 +58,8 @@ module ufo50_video #(
     parameter V_BPORCH = 16,
     parameter V_TOTAL  = 400,
     parameter HS_X     = 3,
-    parameter BOX      = 24
+    parameter BOX      = 24,
+    parameter EXT      = 0
 )(
     input  wire         clk,        // pixel clock
     input  wire         reset_n,    // active-low reset, any clock domain
@@ -63,7 +70,14 @@ module ufo50_video #(
     output reg          hs,
     output reg          vs,
     output wire         skip,
-    output reg  [15:0]  frame_count
+    output reg  [15:0]  frame_count,
+
+    // M3 framebuffer hooks (used when EXT = 1)
+    input  wire [1:0]   src_mode,
+    input  wire [23:0]  fb_rgb,
+    input  wire [23:0]  border_rgb,
+    output wire [9:0]   hcount,
+    output wire [9:0]   vcount
 );
 
 assign skip = 1'b0;
@@ -114,6 +128,9 @@ end
     wire [9:0]  vy = y_count - VB;
 
     wire        frame_start = (x_count == 10'd0) && (y_count == 10'd0);
+
+    assign hcount = x_count;
+    assign vcount = y_count;
 
 // ---------------------------------------------------------------------------
 // bouncing box state (updated once per frame, at x=0,y=0, i.e. in vblank)
@@ -235,6 +252,17 @@ end
     wire [23:0] pat_grey = key_select ? {luma[15:8], luma[15:8], luma[15:8]} : pattern;
     wire [23:0] pat_out  = key_start  ? ~pat_grey : pat_grey;
 
+    // source select (M3)
+    reg  [1:0]  mode_m = 2'd2, mode_s = 2'd2;
+    reg  [23:0] border_m = 24'd0, border_s = 24'd0;
+always @(posedge clk) begin
+    mode_m   <= src_mode;   mode_s   <= mode_m;
+    border_m <= border_rgb; border_s <= border_m;
+end
+    wire [23:0] pix_out = (EXT == 0)        ? pat_out :
+                          mode_s[1]         ? pat_out :
+                          mode_s[0]         ? fb_rgb  : border_s;
+
 // ---------------------------------------------------------------------------
 // registered outputs
 // ---------------------------------------------------------------------------
@@ -248,7 +276,7 @@ always @(posedge clk) begin
         vs  <= frame_start;
         hs  <= (x_count == HS_X);
         de  <= active;
-        rgb <= active ? pat_out : 24'h0;
+        rgb <= active ? pix_out : 24'h0;
     end
 end
 

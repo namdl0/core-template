@@ -43,6 +43,7 @@ import os
 import shutil
 import sys
 import zipfile
+import zlib
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DIST = os.path.join(ROOT, "dist")
@@ -61,6 +62,10 @@ ICON_W = ICON_H = 36
 
 
 # --------------------------------------------------------------------------- utils
+
+SDRAM_LOAD_LO = 0x10000000
+SDRAM_LOAD_HI = 0x13F00000
+
 
 def die(msg):
     print("error: " + msg, file=sys.stderr)
@@ -166,6 +171,7 @@ def validate(verbose=True):
     slots = data.get("data_slots", [])
     chk(len(slots) <= 32, "data.json: at most 32 slots")
     ids = set()
+    loaded = []
     for s in slots:
         where = "data.json slot '%s'" % s.get("name")
         maxlen(s, "name", 15, where)
@@ -185,6 +191,20 @@ def validate(verbose=True):
                     errs.append(where + ": %s is not an int/hex string" % k)
         if s.get("nonvolatile"):
             chk("size_maximum" in s or "size_exact" in s, where + ": nonvolatile slot should set size_maximum")
+        # M3 SoC: slots the APF loads at boot must land in SDRAM below the framebuffers
+        # (bridge 0x10000000-0x13EFFFFF, docs/MEMORY_MAP.md) and must not overlap.
+        if "address" in s and not s.get("deferload") and not s.get("nonvolatile"):
+            try:
+                lo = as_int(s["address"])
+                hi = lo + as_int(s.get("size_maximum", s.get("size_exact", "0")))
+                chk(SDRAM_LOAD_LO <= lo and hi <= SDRAM_LOAD_HI,
+                    where + ": address range 0x%08X-0x%08X is outside SDRAM 0x%08X-0x%08X"
+                    % (lo, hi, SDRAM_LOAD_LO, SDRAM_LOAD_HI))
+                for (olo, ohi, oname) in loaded:
+                    chk(hi <= olo or lo >= ohi, where + ": overlaps slot '%s'" % oname)
+                loaded.append((lo, hi, s.get("name")))
+            except ValueError:
+                pass
 
     inp = load_json(os.path.join(cdir, "input.json"))["input"]
     valid_keys = {"pad_btn_a", "pad_btn_b", "pad_btn_x", "pad_btn_y", "pad_trig_l",
@@ -360,6 +380,37 @@ def cmd_package(args):
         print("copied onto SD card at %s" % target)
 
 
+def xorshift_bytes(size):
+    x = 0x12345678
+    out = bytearray()
+    while len(out) < size:
+        x ^= (x << 13) & 0xFFFFFFFF
+        x ^= x >> 17
+        x ^= (x << 5) & 0xFFFFFFFF
+        out += x.to_bytes(4, "little")
+    return bytes(out[:size])
+
+
+def cmd_testfile(args):
+    """Write a deterministic pseudo-random file (a stand-in ufo50.gmp for the M3
+    slot-0 test) and print the CRC32 the hello firmware should show."""
+    data = xorshift_bytes(as_int(args.size))
+    d = os.path.dirname(os.path.abspath(args.path))
+    os.makedirs(d, exist_ok=True)
+    with open(args.path, "wb") as f:
+        f.write(data)
+    crc = zlib.crc32(data) & 0xFFFFFFFF
+    print("%s: %d bytes, CRC32 %08X (the hello screen should show 'slot0 crc32 %08X')"
+          % (args.path, len(data), crc, crc))
+
+
+def cmd_crc(args):
+    """Print the CRC32 of an existing file (compare with the hello screen)."""
+    with open(args.path, "rb") as f:
+        data = f.read()
+    print("%s: %d bytes, CRC32 %08X" % (args.path, len(data), zlib.crc32(data) & 0xFFFFFFFF))
+
+
 def cmd_selftest(_args):
     ok = True
     t_rbf = os.path.join(ROOT, "src", "fpga", "output_files", "ap_core.rbf")
@@ -403,6 +454,15 @@ def main():
     p = sub.add_parser("image", help="regenerate the placeholder platform image")
     p.add_argument("--preview", help="also write a .pgm preview")
     p.set_defaults(func=cmd_image)
+
+    p = sub.add_parser("testfile", help="write a pseudo-random test file and print its CRC32")
+    p.add_argument("path", help=r"e.g. E:\Assets\ufo50\common\ufo50.gmp")
+    p.add_argument("--size", default="0x100000", help="bytes (default 1 MB)")
+    p.set_defaults(func=cmd_testfile)
+
+    p = sub.add_parser("crc", help="print the CRC32 of a file")
+    p.add_argument("path")
+    p.set_defaults(func=cmd_crc)
 
     p = sub.add_parser("selftest", help="check bit reversal + validate")
     p.set_defaults(func=cmd_selftest)

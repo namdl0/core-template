@@ -225,6 +225,12 @@ input   wire    [15:0]  cont4_trig
     
 );
 
+// clocks, declared before their first use
+    wire    clk_core_12288;
+    wire    clk_core_12288_90deg;
+    wire    pll_core_locked;
+    wire    pll_core_locked_s;
+
 // not using the IR port, so turn off both the LED, and
 // disable the receive circuit to save power
 assign port_ir_tx = 0;
@@ -285,15 +291,7 @@ assign cram1_we_n = 1;
 assign cram1_ub_n = 1;
 assign cram1_lb_n = 1;
 
-assign dram_a = 'h0;
-assign dram_ba = 'h0;
-assign dram_dq = {16{1'bZ}};
-assign dram_dqm = 'h0;
-assign dram_clk = 'h0;
-assign dram_cke = 'h0;
-assign dram_ras_n = 'h1;
-assign dram_cas_n = 'h1;
-assign dram_we_n = 'h1;
+// SDRAM: driven by the M3 SoC (soc/sdram_ctrl.v), see "UFO50 SoC" below
 
 assign sram_a = 'h0;
 assign sram_dq = {16{1'bZ}};
@@ -384,19 +382,19 @@ end
 // bridge target commands
 // synchronous to clk_74a
 
-    reg             target_dataslot_read;       
-    reg             target_dataslot_write;
-    reg             target_dataslot_getfile;    // require additional param/resp structs to be mapped
-    reg             target_dataslot_openfile;   // require additional param/resp structs to be mapped
+    wire            target_dataslot_read;       // driven by soc/dataslot_ctrl.v
+    wire            target_dataslot_write = 1'b0;
+    wire            target_dataslot_getfile = 1'b0;    // require additional param/resp structs to be mapped
+    wire            target_dataslot_openfile = 1'b0;   // require additional param/resp structs to be mapped
     
     wire            target_dataslot_ack;        
     wire            target_dataslot_done;
     wire    [2:0]   target_dataslot_err;
 
-    reg     [15:0]  target_dataslot_id;
-    reg     [31:0]  target_dataslot_slotoffset;
-    reg     [31:0]  target_dataslot_bridgeaddr;
-    reg     [31:0]  target_dataslot_length;
+    wire    [15:0]  target_dataslot_id;
+    wire    [31:0]  target_dataslot_slotoffset;
+    wire    [31:0]  target_dataslot_bridgeaddr;
+    wire    [31:0]  target_dataslot_length;
     
     wire    [31:0]  target_buffer_param_struct; // to be mapped/implemented when using some Target commands
     wire    [31:0]  target_buffer_resp_struct;  // to be mapped/implemented when using some Target commands
@@ -404,9 +402,9 @@ end
 // bridge data slot access
 // synchronous to clk_74a
 
-    wire    [9:0]   datatable_addr;
-    wire            datatable_wren;
-    wire    [31:0]  datatable_data;
+    wire    [9:0]   datatable_addr;             // driven by soc/dataslot_ctrl.v (read only)
+    wire            datatable_wren = 1'b0;
+    wire    [31:0]  datatable_data = 32'd0;
     wire    [31:0]  datatable_q;
 
 core_bridge_cmd icb (
@@ -521,7 +519,14 @@ assign video_skip = vidout_skip;
 assign video_vs = vidout_vs;
 assign video_hs = vidout_hs;
 
+    wire [9:0]  vid_hcount;
+    wire [9:0]  vid_vcount;
+    wire [23:0] soc_fb_rgb;
+    wire [1:0]  soc_vid_mode;
+    wire [23:0] soc_vid_border;
+
 ufo50_video #(
+    .EXT        ( 1 ),
     .H_ACTIVE   ( 384 ),
     .H_BPORCH   ( 64 ),
     .H_TOTAL    ( 512 ),
@@ -538,15 +543,20 @@ ufo50_video #(
     .hs             ( vidout_hs ),
     .vs             ( vidout_vs ),
     .skip           ( vidout_skip ),
-    .frame_count    ( frame_count )
+    .frame_count    ( frame_count ),
+
+    .src_mode       ( soc_vid_mode ),
+    .fb_rgb         ( soc_fb_rgb ),
+    .border_rgb     ( soc_vid_border ),
+    .hcount         ( vid_hcount ),
+    .vcount         ( vid_vcount )
 );
 
 
 
 
 //
-// audio i2s silence generator
-// see other examples for actual audio generation
+// audio: 48 kHz I2S, 16-bit samples from the SoC (ufo50_mixer via soc audio_l/r)
 //
 
 assign audio_mclk = audgen_mclk;
@@ -568,37 +578,154 @@ end
 // generate SCLK = 3.072mhz by dividing MCLK by 4
     reg [1:0]   aud_mclk_divider;
     wire        audgen_sclk = aud_mclk_divider[1] /* synthesis keep*/;
-    reg         audgen_lrck_1;
 always @(posedge audgen_mclk) begin
     aud_mclk_divider <= aud_mclk_divider + 1'b1;
 end
 
-// shift out audio data as I2S 
-// 32 total bits per channel, but only 16 active bits at the start and then 16 dummy bits
-//
-    reg     [4:0]   audgen_lrck_cnt;    
+// shift out audio data as I2S
+// 32 total bits per channel: 16 sample bits (MSB first, one SCLK after LRCK changes),
+// then 16 zero bits. The left/right samples are taken from the SoC (clk_sys) when
+// the left channel starts; the SoC updates them only right after audio_tick, which
+// is generated from that same moment, so they are stable here.
+    reg     [4:0]   audgen_lrck_cnt;
     reg             audgen_lrck;
     reg             audgen_dac;
+    reg     [15:0]  aud_sh;
+    reg     [15:0]  aud_r_hold;
+    reg             aud_frame_t = 1'b0;
+    wire    [15:0]  soc_audio_l, soc_audio_r;
 always @(negedge audgen_sclk) begin
-    audgen_dac <= 1'b0;
-    // 48khz * 64
     audgen_lrck_cnt <= audgen_lrck_cnt + 1'b1;
+    audgen_dac <= 1'b0;
     if(audgen_lrck_cnt == 31) begin
         // switch channels
         audgen_lrck <= ~audgen_lrck;
-        
-    end 
+        if (audgen_lrck) begin                  // 1 -> 0: left channel starts
+            aud_sh      <= soc_audio_l;
+            aud_r_hold  <= soc_audio_r;
+            aud_frame_t <= ~aud_frame_t;
+        end else
+            aud_sh <= aud_r_hold;
+    end else if (audgen_lrck_cnt[4] == 1'b0) begin
+        audgen_dac <= aud_sh[15];
+        aud_sh <= {aud_sh[14:0], 1'b0};
+    end
 end
+
+    // 48 kHz tick into clk_sys
+    reg [2:0]   aud_tick_s;
+always @(posedge clk_sys) aud_tick_s <= {aud_tick_s[1:0], aud_frame_t};
+    wire        soc_audio_tick = aud_tick_s[2] ^ aud_tick_s[1];
+
+
+////////////////////////////////////////////////////////////////////////////////////////
+//
+// UFO50 SoC (milestone M3): VexRiscv RV32IMFD + SDRAM + framebuffer + data slots.
+// See docs/MEMORY_MAP.md.
+//
+
+    // clk_sys = 57.75 MHz. To change it, edit SYS_FREQ_STR and SYS_FREQ_HZ together
+    // (exact values listed in mf_pllsys.v) and the clock name in core_constraints.sdc stays valid.
+    localparam  SYS_FREQ_STR = "57.750000 MHz";
+    localparam  SYS_FREQ_HZ  = 32'd57_750_000;
+
+    wire    clk_sys;
+    wire    pll_sys_locked;
+
+mf_pllsys #( .OUT_FREQ(SYS_FREQ_STR) ) mp2 (
+    .refclk         ( clk_74a ),
+    .rst            ( 1'b0 ),
+    .outclk_0       ( clk_sys ),
+    .locked         ( pll_sys_locked )
+);
+
+    // resets: rst_mem while the PLL is unlocked (SDRAM + bridge path keep running while
+    // the APF holds reset_n low, because the APF loads data slots during that time);
+    // rst_sys additionally while reset_n is low (CPU and peripherals).
+    reg [2:0]   rst_mem_s = 3'b111;
+always @(posedge clk_sys or negedge pll_sys_locked) begin
+    if (!pll_sys_locked) rst_mem_s <= 3'b111;
+    else                 rst_mem_s <= {rst_mem_s[1:0], 1'b0};
+end
+    wire        rst_mem = rst_mem_s[2];
+    reg [2:0]   reset_n_s = 3'b000;
+    reg         rst_sys = 1'b1;
+always @(posedge clk_sys) begin
+    reset_n_s <= {reset_n_s[1:0], reset_n};
+    rst_sys   <= rst_mem | ~reset_n_s[2];
+end
+
+    wire [15:0] sd_dq_out;
+    wire        sd_dq_oe;
+assign dram_dq = sd_dq_oe ? sd_dq_out : {16{1'bZ}};
+
+// dram_clk = inverted clk_sys through a DDIO output register (same IO timing as the
+// command/data outputs): the SDRAM samples half a clock after the FPGA launches.
+pin_ddio_clk sdram_clk_out (
+    .datain_h       ( 1'b0 ),
+    .datain_l       ( 1'b1 ),
+    .outclock       ( clk_sys ),
+    .dataout        ( dram_clk )
+);
+
+ufo50_soc #(
+    .CLK_SYS_HZ     ( SYS_FREQ_HZ ),
+    .BOOT_HEX       ( "core/fw/boot" )
+) soc (
+    .clk_sys        ( clk_sys ),
+    .rst_mem        ( rst_mem ),
+    .rst_sys        ( rst_sys ),
+
+    .sd_a           ( dram_a ),
+    .sd_ba          ( dram_ba ),
+    .sd_dqm         ( dram_dqm ),
+    .sd_cke         ( dram_cke ),
+    .sd_ras_n       ( dram_ras_n ),
+    .sd_cas_n       ( dram_cas_n ),
+    .sd_we_n        ( dram_we_n ),
+    .sd_dq_out      ( sd_dq_out ),
+    .sd_dq_oe       ( sd_dq_oe ),
+    .sd_dq_in       ( dram_dq ),
+
+    .clk_vid        ( clk_core_12288 ),
+    .vid_x          ( vid_hcount ),
+    .vid_y          ( vid_vcount ),
+    .vid_fb_rgb     ( soc_fb_rgb ),
+    .vid_mode       ( soc_vid_mode ),
+    .vid_border     ( soc_vid_border ),
+
+    .clk_74a        ( clk_74a ),
+    .bridge_addr    ( bridge_addr ),
+    .bridge_wr      ( bridge_wr ),
+    .bridge_wr_data ( bridge_wr_data ),
+    .target_dataslot_read       ( target_dataslot_read ),
+    .target_dataslot_id         ( target_dataslot_id ),
+    .target_dataslot_slotoffset ( target_dataslot_slotoffset ),
+    .target_dataslot_bridgeaddr ( target_dataslot_bridgeaddr ),
+    .target_dataslot_length     ( target_dataslot_length ),
+    .target_dataslot_ack        ( target_dataslot_ack ),
+    .target_dataslot_done       ( target_dataslot_done ),
+    .target_dataslot_err        ( target_dataslot_err ),
+    .datatable_addr             ( datatable_addr ),
+    .datatable_q                ( datatable_q ),
+    .dataslot_allcomplete       ( dataslot_allcomplete ),
+    .osnotify_inmenu            ( osnotify_inmenu ),
+    .rtc_epoch_seconds          ( rtc_epoch_seconds ),
+    .rtc_valid                  ( rtc_valid ),
+    .cont_key       ( {cont4_key, cont3_key, cont2_key, cont1_key} ),
+    .cont_joy       ( {cont4_joy, cont3_joy, cont2_joy, cont1_joy} ),
+    .cont_trig      ( {cont4_trig, cont3_trig, cont2_trig, cont1_trig} ),
+
+    .audio_tick     ( soc_audio_tick ),
+    .audio_l        ( soc_audio_l ),
+    .audio_r        ( soc_audio_r )
+);
 
 
 ///////////////////////////////////////////////
 
 
-    wire    clk_core_12288;
-    wire    clk_core_12288_90deg;
-    
-    wire    pll_core_locked;
-    wire    pll_core_locked_s;
+    // (clk_core_12288, clk_core_12288_90deg, pll_core_locked[_s] are declared at the top)
 synch_3 s01(pll_core_locked, pll_core_locked_s, clk_74a);
 
 mf_pllbase mp1 (
