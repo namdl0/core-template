@@ -88,6 +88,46 @@ module vl_top (
         .audio_tick(aud_tick), .audio_l(aud_l), .audio_r(aud_r)
     );
 
+`ifdef BLITDBG
+    // debug: every blitter SDRAM command touching blocks [BLITDBG_LO, BLITDBG_HI] (byte address >> 5),
+    // its write beats, and the engine-side requests (sim/verilator: build with -DBLITDBG)
+    localparam [20:0] DBG_LO = `BLITDBG_LO, DBG_HI = `BLITDBG_HI;
+    reg dbg_on = 1'b0; reg [3:0] dbg_left = 4'd0; reg [63:0] dbg_cyc = 64'd0;
+    wire [23:0] x0_addr = soc.p_addr[5*24 +: 24];
+    always @(posedge clk_sys) begin
+        dbg_cyc <= dbg_cyc + 1'b1;
+        if (dbg_cyc >= `BLITDBG_C0 && dbg_cyc <= `BLITDBG_C1 && soc.arb.c_valid && soc.arb.c_ready)
+            $display("%0d CTRL accept port %0d %s word %h len %0d", dbg_cyc, soc.arb.sel, soc.arb.c_we ? "WR" : "RD",
+                     {soc.arb.c_addr, 2'b00}, soc.arb.c_len + 1);
+        if (soc.p_valid[5] && soc.p_ready[5] && ((x0_addr[23:3] >= DBG_LO && x0_addr[23:3] <= DBG_HI)
+            || (dbg_cyc >= `BLITDBG_C0 && dbg_cyc <= `BLITDBG_C1))) begin
+            $display("%0d X0 %s word %h len %0d", dbg_cyc, soc.p_we[5] ? "WR" : "RD", {x0_addr, 2'b00}, soc.p_len[5*3 +: 3] + 1);
+            if (soc.p_we[5]) begin dbg_on <= 1'b1; dbg_left <= {1'b0, soc.p_len[5*3 +: 3]} + 4'd1; end
+        end
+        if (dbg_on && soc.p_wready[5]) begin
+            $display("%0d    beat %h strb %b", dbg_cyc, soc.p_wdata[5*32 +: 32], soc.p_wstrb[5*4 +: 4]);
+            if (dbg_left == 4'd1) dbg_on <= 1'b0;
+            dbg_left <= dbg_left - 1'b1;
+        end
+        if (dbg_cyc >= `BLITDBG_C0 && dbg_cyc <= `BLITDBG_C1) begin
+            if (soc.blit.dut.eng.m_rvalid)
+                $display("%0d   rvalid kind %0d slot %0d idx %0d data %h tot %0d", dbg_cyc, soc.blit.dut.eng.tq_head[22:20],
+                         soc.blit.dut.eng.tq_head[19], soc.blit.dut.eng.rt_sum, soc.blit.dut.eng.m_rdata, soc.blit.dut.eng.returned_total);
+            if (soc.blit.dut.eng.fs == 3'd6 && !soc.blit.dut.eng.job_valid)
+                $display("%0d   F_W row %0d issued_total %0d returned %0d", dbg_cyc, soc.blit.dut.eng.f_row,
+                         soc.blit.dut.eng.issued_total, soc.blit.dut.eng.returned_total);
+            if (soc.blit.dut.eng.c_can)
+                $display("%0d   compute start row %0d fd_row %0d returned %0d mark0 %0d mark1 %0d", dbg_cyc,
+                         soc.blit.dut.eng.c_row, soc.blit.dut.eng.fd_row, soc.blit.dut.eng.returned_total,
+                         soc.blit.dut.eng.mark[0], soc.blit.dut.eng.mark[1]);
+        end
+        if (soc.blit.dut.eng.m_valid && soc.blit.dut.eng.m_ready && soc.blit.dut.eng.m_addr[25:5] >= DBG_LO
+            && soc.blit.dut.eng.m_addr[25:5] <= DBG_HI)
+            $display("%0d ENG %s addr %h len %0d", dbg_cyc, soc.blit.dut.eng.m_write ? "WR" : "RD",
+                     soc.blit.dut.eng.m_addr, soc.blit.dut.eng.m_len);
+    end
+`endif
+
     // firmware DEBUG_OUT (0x80000FFC) marker writes
     assign dbg_wr    = soc.m_cyc & soc.m_we & (soc.m_adr == 30'h2000_03FF) & soc.sys_ack;
     assign dbg_val   = soc.m_dat_w;

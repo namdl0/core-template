@@ -1,13 +1,14 @@
 //
 // sdram_ctrl.v - single-port SDR SDRAM controller for the Pocket's 512 Mbit x16 SDRAM
 //
-// UFO50 Pocket SoC (M3). Closed-page: every access is ACTIVE, 1..8 READ/WRITE
-// commands (burst length 2 = one 32-bit beat each, issued every 2 clocks so data
-// streams without gaps), the last one with auto-precharge.
+// UFO50 Pocket SoC (M3, M5: long bursts). Closed-page: every access is ACTIVE, 1..64
+// READ/WRITE commands (burst length 2 = one 32-bit beat each, issued every 2 clocks so
+// data streams without gaps), the last one with auto-precharge. An access of n beats
+// costs 2n + 7 clocks, so long accesses amortise the ACTIVE/precharge overhead.
 //
 // Geometry: 4 banks x 8192 rows x 1024 columns x 16 bit = 64 MB.
 // Byte address [25:0]: col = [10:1], bank = [12:11], row = [25:13].
-// A burst must stay inside an aligned 32-byte block (never crosses a row).
+// A burst must stay inside one 2 KB SDRAM row (never crosses a row).
 //
 // Clocking (see docs/MEMORY_MAP.md and BUILDING.md):
 //   - commands/addresses/write data are launched on posedge clk from IO registers
@@ -18,13 +19,15 @@
 //
 // Timing at 57.75 MHz (P = 17.3 ns), conservative for -6/-7 parts:
 //   tRCD = 2 clk, tRP = 2 clk, tRC >= 6 clk, tRFC = 8 clk, CL = 2, tWR+tRP = 4 clk
-//   refresh every REFRESH_CYCLES (384 clk = 6.6 us; 8192 rows per 54 ms)
+//   refresh every REFRESH_CYCLES (300 clk = 5.2 us; 8192 rows per 43 ms). A refresh waits for
+//   the access in progress (at most 64 beats = 135 clk = 2.3 us), so the gap between two
+//   refreshes stays below tREFI = 7.8 us even then.
 //
 `default_nettype none
 
 module sdram_ctrl #(
     parameter INIT_CYCLES    = 16'd12000,   // >= 200 us at 57.75 MHz
-    parameter REFRESH_CYCLES = 10'd384
+    parameter REFRESH_CYCLES = 10'd300
 )(
     input  wire        clk,
     input  wire        rst,             // synchronous, active high (PLL not locked)
@@ -34,7 +37,7 @@ module sdram_ctrl #(
     output wire        cmd_ready,       // pulses in the cycle the command is accepted
     input  wire        cmd_we,
     input  wire [25:2] cmd_addr,
-    input  wire [2:0]  cmd_len,         // beats - 1
+    input  wire [5:0]  cmd_len,         // beats - 1 (1..64 beats)
     input  wire [31:0] wdata,
     input  wire [3:0]  wstrb,
     output wire        wready,          // current beat consumed this cycle
@@ -72,7 +75,7 @@ localparam [3:0] S_INIT = 4'd0, S_INIT_PRE = 4'd1, S_INIT_REF = 4'd2, S_INIT_MRS
 
     reg        a_we;
     reg [25:2] a_addr;
-    reg [2:0]  a_left;      // beats remaining - 1
+    reg [5:0]  a_left;      // beats remaining - 1
     reg        phase;       // 0 = command cycle, 1 = second data cycle
     reg [15:0] wr_hi;
     reg [1:0]  wr_dqm_hi;
@@ -204,17 +207,17 @@ always @(posedge clk) begin
             if (!phase) begin
                 sdcmd(C_RD);
                 sd_dqm   <= 2'b00;
-                sd_a     <= {2'b00, (a_left == 3'd0), col};
+                sd_a     <= {2'b00, (a_left == 6'd0), col};
                 rd_pipe[0] <= 1'b1;
                 phase    <= 1'b1;
             end else begin
                 phase <= 1'b0;
-                if (a_left == 3'd0) begin
+                if (a_left == 6'd0) begin
                     cnt   <= 16'd4;              // precharge + last data
                     state <= S_WAIT;
                 end else begin
-                    a_left <= a_left - 3'd1;
-                    a_addr[4:2] <= a_addr[4:2] + 3'd1;
+                    a_left <= a_left - 6'd1;
+                    a_addr[10:2] <= a_addr[10:2] + 9'd1;
                 end
             end
         end
@@ -223,7 +226,7 @@ always @(posedge clk) begin
             sd_dq_oe <= 1'b1;
             if (!phase) begin
                 sdcmd(C_WR);
-                sd_a      <= {2'b00, (a_left == 3'd0), col};
+                sd_a      <= {2'b00, (a_left == 6'd0), col};
                 sd_dq_out <= wdata[15:0];
                 sd_dqm    <= ~wstrb[1:0];
                 wr_hi     <= wdata[31:16];
@@ -233,12 +236,12 @@ always @(posedge clk) begin
                 sd_dq_out <= wr_hi;
                 sd_dqm    <= wr_dqm_hi;
                 phase     <= 1'b0;
-                if (a_left == 3'd0) begin
+                if (a_left == 6'd0) begin
                     cnt   <= 16'd4;              // tWR + tRP
                     state <= S_WAIT;
                 end else begin
-                    a_left <= a_left - 3'd1;
-                    a_addr[4:2] <= a_addr[4:2] + 3'd1;
+                    a_left <= a_left - 6'd1;
+                    a_addr[10:2] <= a_addr[10:2] + 9'd1;
                 end
             end
         end

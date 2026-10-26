@@ -26,7 +26,7 @@ module bridge_sdram (
     output wire         p_valid,
     input  wire         p_ready,
     output wire [25:2]  p_addr,
-    output wire [2:0]   p_len,
+    output wire [5:0]   p_len,
     output wire [31:0]  p_wdata,
     output wire [3:0]   p_wstrb,
     input  wire         p_wready,
@@ -83,7 +83,7 @@ end
 
     assign p_valid = flushing && !issued;
     assign p_addr  = {blk_a, 3'b000};
-    assign p_len   = 3'd7;
+    assign p_len   = 6'd7;
     assign p_wdata = blk[beat];
     assign p_wstrb = {4{blk_v[beat]}};
     assign idle    = f_empty && !blk_any && !flushing;

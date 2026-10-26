@@ -17,7 +17,7 @@ module sdram_arb #(
     input  wire [N-1:0]      p_valid,
     input  wire [N-1:0]      p_we,
     input  wire [N*24-1:0]   p_addr,      // [25:2] word address per port
-    input  wire [N*3-1:0]    p_len,
+    input  wire [N*6-1:0]    p_len,       // beats - 1 (1..64, within one 2 KB SDRAM row)
     input  wire [N*32-1:0]   p_wdata,
     input  wire [N*4-1:0]    p_wstrb,
     output wire [N-1:0]      p_ready,
@@ -30,7 +30,7 @@ module sdram_arb #(
     input  wire              c_ready,
     output wire              c_we,
     output wire [25:2]       c_addr,
-    output wire [2:0]        c_len,
+    output wire [5:0]        c_len,
     output wire [31:0]       c_wdata,
     output wire [3:0]        c_wstrb,
     input  wire              c_wready,
@@ -41,7 +41,7 @@ module sdram_arb #(
     reg         busy;
     reg  [2:0]  owner;
     reg         o_we;
-    reg  [2:0]  left;
+    reg  [5:0]  left;
 
     // priority select (lowest index wins)
     reg  [2:0]  sel;
@@ -62,7 +62,7 @@ module sdram_arb #(
     assign c_valid = any && !busy;
     assign c_we    = p_we[sel];
     assign c_addr  = p_addr[sel*24 +: 24];
-    assign c_len   = p_len[sel*3 +: 3];
+    assign c_len   = p_len[sel*6 +: 6];
     assign c_wdata = p_wdata[m*32 +: 32];
     assign c_wstrb = p_wstrb[m*4 +: 4];
     assign p_rdata = c_rdata;
@@ -86,10 +86,10 @@ always @(posedge clk) begin
         end
     end else begin
         if ((o_we && c_wready) || (!o_we && c_rvalid)) begin
-            if (left == 3'd0)
+            if (left == 6'd0)
                 busy <= 1'b0;
             else
-                left <= left - 3'd1;
+                left <= left - 6'd1;
         end
     end
 end

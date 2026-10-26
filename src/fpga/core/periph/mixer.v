@@ -20,7 +20,7 @@ module mixer #(
     output wire        mem_cmd_valid,
     output wire        mem_cmd_we,
     output wire [25:2] mem_cmd_addr,
-    output wire [2:0]  mem_cmd_len,
+    output wire [5:0]  mem_cmd_len,
     output wire [31:0] mem_wdata,
     output wire [3:0]  mem_wstrb,
     input  wire        mem_cmd_ready,

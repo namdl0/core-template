@@ -44,6 +44,8 @@ struct Sdram {
     void err(double now, const char *m) {
         if (++errors <= 20) printf("[%.3f us] SDRAM MODEL ERROR: %s\n", now / 1e6, m);
     }
+    uint32_t dbg_lo = getenv("DBG_HA_LO") ? strtoul(getenv("DBG_HA_LO"), 0, 16) : 0;
+    uint32_t dbg_hi = getenv("DBG_HA_HI") ? strtoul(getenv("DBG_HA_HI"), 0, 16) : 0;
     static uint32_t ha(int b, int r, int c) { return ((uint32_t)r << 12) | ((uint32_t)b << 10) | (uint32_t)c; }
 
     // data the FPGA sees at the falling clk_sys edge that is SDRAM edge `edge+1`
@@ -65,6 +67,7 @@ struct Sdram {
             uint16_t &m = mem[wr_addr];
             if (!(dqm & 1)) m = (m & 0xFF00) | (dq & 0xFF);
             if (!(dqm & 2)) m = (m & 0x00FF) | (dq & 0xFF00);
+            if (wr_addr >= dbg_lo && wr_addr < dbg_hi) printf("SDW %.3f ha %07x = %04x dqm %d\n", now / 1e3, wr_addr, m, dqm);
             wr_addr = (wr_addr & ~7u) | ((wr_addr + 1) & 7u);
             if (--wr_left == 0) t_wr[wr_bank] = now;
         }
@@ -126,6 +129,7 @@ struct Sdram {
             uint16_t &m = mem[wr_addr];
             if (!(dqm & 1)) m = (m & 0xFF00) | (dq & 0xFF);
             if (!(dqm & 2)) m = (m & 0x00FF) | (dq & 0xFF00);
+            if (wr_addr >= dbg_lo && wr_addr < dbg_hi) printf("SDW %.3f ha %07x = %04x dqm %d (WRITE)\n", now / 1e3, wr_addr, m, dqm);
             wr_addr = (wr_addr & ~7u) | ((wr_addr + 1) & 7u);
             wr_left = bl - 1; wr_bank = ba;
             if (bl == 1) t_wr[ba] = now;
@@ -142,6 +146,11 @@ struct Sdram {
         int col = h & 0x3FF, bank = (h >> 10) & 3, r = (h >> 12) & 0x1FFF;
         return mem[ha(bank, r, col)];
     }
+    void set_hw(uint32_t byte_off, uint16_t v) {
+        uint32_t h = byte_off >> 1;
+        int col = h & 0x3FF, bank = (h >> 10) & 3, r = (h >> 12) & 0x1FFF;
+        mem[ha(bank, r, col)] = v;
+    }
 };
 
 // ------------------------------------------------------------------ main
@@ -152,6 +161,22 @@ int main(int argc, char **argv) {
 
     Vvl_top *top = new Vvl_top;
     Sdram sd;
+    // +preload=<file>@<hex SDRAM byte offset>: raw little-endian bytes copied into the SDRAM model
+    // before reset (benchmarks: firmware/bench). May be given several times.
+    bool bench = false; long bench_bad = -1;
+    for (int i = 1; i < argc; i++) if (!strncmp(argv[i], "+preload=", 9)) {
+        std::string a = argv[i] + 9; size_t at = a.rfind('@');
+        uint32_t off = (uint32_t)strtoul(a.c_str() + at + 1, NULL, 16);
+        FILE *pf = fopen(a.substr(0, at).c_str(), "rb");
+        if (!pf) { printf("cannot open %s\n", a.substr(0, at).c_str()); return 1; }
+        std::vector<uint8_t> buf; uint8_t tmp[65536]; size_t n;
+        while ((n = fread(tmp, 1, sizeof tmp, pf)) > 0) buf.insert(buf.end(), tmp, tmp + n);
+        fclose(pf);
+        if (buf.size() & 1) buf.push_back(0);
+        for (size_t k = 0; k < buf.size(); k += 2) sd.set_hw(off + (uint32_t)k, (uint16_t)(buf[k] | buf[k + 1] << 8));
+        printf("preloaded %zu bytes at SDRAM +%08x\n", buf.size(), off);
+        bench = true;
+    }
     std::vector<uint8_t> slot0(256);
     for (int k = 0; k < 256; k++) slot0[k] = (uint8_t)((k * 37 + 11) ^ (k >> 3));
     auto slot_word = [&](uint32_t o) -> uint32_t {   // big-endian bridge word
@@ -221,6 +246,12 @@ int main(int argc, char **argv) {
                         printf("[%.3f ms] FIRMWARE TRAP mcause=%04x\n", t / 1e9, marker & 0xFFFF);
                         trapped = true; done = true;
                     } else if ((marker >> 16) == 1) live = marker & 0xFFFF;
+                    else if ((marker >> 24) == 0xBE) {   /* benchmark firmware: 0xBE tt vvvv (tag, value in units given by tag) */
+                        uint32_t tg = (marker >> 16) & 0xFF, v = marker & 0xFFFF;
+                        printf("[%.3f ms] BENCH %02x %u\n", t / 1e9, tg, v);
+                        if (tg == 0x01) bench_bad = v;
+                        if (tg == 0xFF) done = true;
+                    }
                     else printf("[%.3f ms] firmware step %u\n", t / 1e9, marker);
                 }
             }
@@ -302,7 +333,8 @@ int main(int argc, char **argv) {
                 // boot: load slot 0 while reset_n is low, then release
                 if (!loaded && t > 21e6) {
                     printf("[%.3f ms] APF: loading slot 0 (%zu bytes) over the bridge\n", t / 1e9, slot0.size());
-                    for (uint32_t k = 0; k < slot0.size(); k += 4) bq.push_back({0x10000000u + k, slot_word(k)});
+                    // benchmarks preload SDRAM from +0 themselves: the slot-0 test file would overwrite it
+                    if (!bench) for (uint32_t k = 0; k < slot0.size(); k += 4) bq.push_back({0x10000000u + k, slot_word(k)});
                     loaded = true;
                 }
                 if (loaded && !released && bq.empty() && b_gap == 0) {
@@ -347,7 +379,8 @@ int main(int argc, char **argv) {
            cmp_frames, mismatches, live, n0180, t / 1e9);
     printf("D$ line refills %ld, avg %.1f cycles; I$ line refills %ld, avg %.1f cycles (incl. boot RAM)\n",
            d_n, d_n ? (double)d_lat / d_n : 0.0, i_n, i_n ? (double)i_lat / i_n : 0.0);
-    bool pass = !trapped && sd.errors == 0 && mismatches == 0 && cmp_frames >= 2 && live >= 3 && n0180 >= 1;
+    bool pass = bench ? (!trapped && sd.errors == 0 && bench_bad == 0)
+                      : (!trapped && sd.errors == 0 && mismatches == 0 && cmp_frames >= 2 && live >= 3 && n0180 >= 1);
     printf(pass ? "TB_SOC PASS\n" : "TB_SOC FAIL\n");
     top->final();
     delete top;

@@ -132,14 +132,14 @@ VexRiscv cpu (
     localparam NP = 6;
     wire [NP-1:0]    p_valid, p_we, p_ready, p_wready, p_rvalid;
     wire [NP*24-1:0] p_addr;
-    wire [NP*3-1:0]  p_len;
+    wire [NP*6-1:0]  p_len;           // beats - 1 per port (1..64 beats, within one 2 KB SDRAM row)
     wire [NP*32-1:0] p_wdata;
     wire [NP*4-1:0]  p_wstrb;
     wire [31:0]      p_rdata;
 
     wire        c_valid, c_ready, c_we, c_wready, c_rvalid, c_idle, sd_init_done;
     wire [25:2] c_addr;
-    wire [2:0]  c_len;
+    wire [5:0]  c_len;
     wire [31:0] c_wdata, c_rdata;
     wire [3:0]  c_wstrb;
 
@@ -225,7 +225,7 @@ sdram_ctrl #( .INIT_CYCLES(SDRAM_INIT_CYCLES) ) sdc (
     assign p_valid[4]          = (ib_state == IB_SD) && !ib_issued;
     assign p_we[4]             = 1'b0;
     assign p_addr[4*24 +: 24]  = ib_word[25:2];
-    assign p_len[4*3 +: 3]     = ib_left[2:0];
+    assign p_len[4*6 +: 6]     = {3'b000, ib_left[2:0]};
     assign p_wdata[4*32 +: 32] = 32'd0;
     assign p_wstrb[4*4 +: 4]   = 4'd0;
 
@@ -312,7 +312,7 @@ end
     assign p_we[3]             = (db_state == DB_SD_W);
     assign p_addr[3*24 +: 24]  = (db_state == DB_SD_W) ? {db_addr[25:3], (db_wlo ? 1'b0 : 1'b1)}
                                        : db_line ? {db_addr[25:5], 3'b000} : {db_addr[25:3], 1'b0};
-    assign p_len[3*3 +: 3]     = (db_state == DB_SD_W) ? {2'b00, db_wlo & db_whi} : db_issue[2:0];
+    assign p_len[3*6 +: 6]     = (db_state == DB_SD_W) ? {5'b00000, db_wlo & db_whi} : {3'b000, db_issue[2:0]};
     assign p_wdata[3*32 +: 32] = (db_wbeat || !db_wlo) ? db_data[63:32] : db_data[31:0];
     assign p_wstrb[3*4 +: 4]   = (db_wbeat || !db_wlo) ? db_mask[7:4]   : db_mask[3:0];
 
@@ -622,7 +622,7 @@ end
 vid_scanout scan (
     .clk_sys(clk_sys), .rst_sys(rst_mem),
     .fb_base(fb_active[25:0]), .fmt32(fmt_active),
-    .p_valid(p_valid[0]), .p_ready(p_ready[0]), .p_addr(p_addr[0*24 +: 24]), .p_len(p_len[0*3 +: 3]),
+    .p_valid(p_valid[0]), .p_ready(p_ready[0]), .p_addr(p_addr[0*24 +: 24]), .p_len(p_len[0*6 +: 6]),
     .p_rvalid(p_rvalid[0]), .p_rdata(p_rdata),
     .vblank_pulse(vblank_pulse), .vactive_pulse(vactive_pulse), .line(vid_line),
     .clk_vid(clk_vid), .vid_x(vid_x), .vid_y(vid_y), .pix_rgb(vid_fb_rgb)
@@ -638,7 +638,7 @@ vid_scanout scan (
 bridge_sdram bsd (
     .clk_74a(clk_74a), .bridge_addr(bridge_addr), .bridge_wr(bridge_wr), .bridge_wr_data(bridge_wr_data),
     .clk_sys(clk_sys), .rst_sys(rst_mem),
-    .p_valid(p_valid[1]), .p_ready(p_ready[1]), .p_addr(p_addr[1*24 +: 24]), .p_len(p_len[1*3 +: 3]),
+    .p_valid(p_valid[1]), .p_ready(p_ready[1]), .p_addr(p_addr[1*24 +: 24]), .p_len(p_len[1*6 +: 6]),
     .p_wdata(p_wdata[1*32 +: 32]), .p_wstrb(p_wstrb[1*4 +: 4]), .p_wready(p_wready[1]),
     .idle(bridge_idle)
 );
@@ -672,7 +672,7 @@ ufo50_blitter blit (
     .wb_adr(m_adr[15:2]), .wb_dat_w(m_dat_w), .wb_sel(m_sel), .wb_we(m_we),
     .wb_cyc(sel_blit), .wb_stb(sel_blit), .wb_dat_r(blit_dat), .wb_ack(blit_ack), .irq(blit_irq),
     .mem_cmd_valid(p_valid[5]), .mem_cmd_we(p_we[5]), .mem_cmd_addr(p_addr[5*24 +: 24]),
-    .mem_cmd_len(p_len[5*3 +: 3]), .mem_wdata(p_wdata[5*32 +: 32]), .mem_wstrb(p_wstrb[5*4 +: 4]),
+    .mem_cmd_len(p_len[5*6 +: 6]), .mem_wdata(p_wdata[5*32 +: 32]), .mem_wstrb(p_wstrb[5*4 +: 4]),
     .mem_cmd_ready(p_ready[5]), .mem_wready(p_wready[5]), .mem_rdata(p_rdata), .mem_rvalid(p_rvalid[5]),
     .present(blit_present)
 );
@@ -682,7 +682,7 @@ ufo50_mixer mix (
     .wb_adr(m_adr[15:2]), .wb_dat_w(m_dat_w), .wb_sel(m_sel), .wb_we(m_we),
     .wb_cyc(sel_mix), .wb_stb(sel_mix), .wb_dat_r(mix_dat), .wb_ack(mix_ack), .irq(mix_irq),
     .mem_cmd_valid(p_valid[2]), .mem_cmd_we(p_we[2]), .mem_cmd_addr(p_addr[2*24 +: 24]),
-    .mem_cmd_len(p_len[2*3 +: 3]), .mem_wdata(p_wdata[2*32 +: 32]), .mem_wstrb(p_wstrb[2*4 +: 4]),
+    .mem_cmd_len(p_len[2*6 +: 6]), .mem_wdata(p_wdata[2*32 +: 32]), .mem_wstrb(p_wstrb[2*4 +: 4]),
     .mem_cmd_ready(p_ready[2]), .mem_wready(p_wready[2]), .mem_rdata(p_rdata), .mem_rvalid(p_rvalid[2]),
     .audio_tick(audio_tick), .audio_l(mix_l), .audio_r(mix_r),
     .present(mix_present)

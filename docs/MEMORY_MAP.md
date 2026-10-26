@@ -191,7 +191,7 @@ mixer = port 2 "X1"). `periph_stub.v` is a small working example of both interfa
 output wire        mem_cmd_valid,
 output wire        mem_cmd_we,       // 1 = write
 output wire [25:2] mem_cmd_addr,     // SDRAM word address: (CPU address - 0x1000_0000) >> 2
-output wire [2:0]  mem_cmd_len,      // beats - 1 (1..8 beats of 32 bits)
+output wire [5:0]  mem_cmd_len,      // beats - 1 (1..64 beats of 32 bits; 3 bits / 1..8 beats before v0.4)
 output wire [31:0] mem_wdata,        // current write beat
 output wire [3:0]  mem_wstrb,        // byte enables of the current write beat
 // arbiter -> master
@@ -202,7 +202,9 @@ input  wire        mem_rvalid        // read beat (one pulse per beat, in order)
 ```
 
 Protocol:
-- **Burst limits**: a burst must not cross an aligned **32-byte** boundary (`addr[4:2] + len <= 7`).
+- **Burst limits** (v0.4): 1..64 beats, and a burst must not cross a **2 KB SDRAM row** (`addr[10:2] + len <= 511`).
+  Long bursts are much cheaper per byte (see the cost line below). `periph_mem_port` uses up to 32 beats inside
+  aligned 128-byte blocks; the scanout uses 64-beat (256 B) bursts; the CPU ports and the APF bridge stay at 8.
 - **Command**: the master holds `valid`, `we`, `addr`, `len` until `ready`. `ready` may come many cycles
   later (arbitration, refresh). The command is accepted in the cycle with `valid & ready`.
 - **Write data** is pulled: beat 0 must be on `wdata/wstrb` when the command is presented. The arbiter
@@ -213,7 +215,10 @@ Protocol:
 - **Read data**: `len+1` `rvalid` pulses in address order, no backpressure (the master must accept).
 - **One outstanding command per port**: after acceptance, the next command is accepted only after the
   last `wready` (write) or the last `rvalid` (read). Holding `valid` early is fine.
-- Typical cost: a closed-page access is ~8 `clk_sys` cycles + 2 per beat; 8 beats (32 B) ~ 24 cycles.
+- Cost: a closed-page access of n beats takes 2n + 7 `clk_sys` cycles in the controller (ACTIVE, tRCD, n READ/WRITE
+  commands two clocks apart, auto-precharge and recovery), plus a few cycles of arbitration: 8 beats (32 B) ~23-26
+  cycles (~70% of the bus rate), 32 beats ~71 (~90%), 64 beats ~135 (~95%).
+- Worst-case wait for a high-priority port is one access in progress: up to ~140 cycles (a 64-beat scanout burst).
 - Arbitration (fixed priority, may be tuned; not part of the contract): video scanout > bridge (APF) >
   `X1` mixer > CPU D-bus > CPU I-bus > `X0` blitter. `mem_rdata` is shared by all ports: it is only
   meaningful in a cycle where your own `mem_rvalid` is high.
@@ -221,7 +226,8 @@ Protocol:
   write-only for the CPU), the CPU invalidates its D$ or reads through `0x5xxx_xxxx`. A master must not assume a bound on `ready`
   latency, but video takes ~12% of SDRAM time in RGB565 and ~25% in ABGR8888 (frame average; up to ~50% during
   active lines), and a CPU burst is <= 32 B.
-- Peak bandwidth: 16-bit SDR at 57.75 MHz = 115 MB/s raw; ~75-90 MB/s for 32-byte bursts.
+- Peak bandwidth: 16-bit SDR at 57.75 MHz = 115 MB/s raw; ~80 MB/s for 32-byte bursts, ~105-110 MB/s for
+  64-beat bursts. Refresh every 300 cycles (5.2 us), so a refresh delayed by the longest access still meets tREFI.
 
 ## 6. Framebuffer format
 
@@ -285,6 +291,9 @@ I$ invalidate: `fence.i`. The FPU must be enabled before use (`mstatus.FS`, done
   additions: module/file names `ufo50_blitter`/`ufo50_mixer`, a `present` output, and the arbiter port numbers.
   Registers: `VID_STATUS[23:16]` is the last fetched line (was "current line"); `VID_CTRL` reset value is 2
   (test pattern); new `SDRAM_STATUS` (0x120) and `DEBUG_OUT` (0xFFC); section 8 (runtime notes) added.
+- v0.4 (2026-10-25, branch `ufo50-m5`): **SDRAM bursts up to 64 beats** within a 2 KB row (`mem_cmd_len` is
+  6 bits), refresh every 300 cycles. Real Barbuta/library frames replayed on the SoC (`firmware/bench`,
+  `tools/blitbench.py`): blitter time per frame 946k -> 710k / 1,005k -> 768k cycles, bit-exact.
 - v0.3 (2026-10-25, branch `ufo50-m4`): the real blitter/mixer replace the stubs (`SYS_CONFIG` bits 25/26 read
   1). New `VID_CTRL` bit 2: ABGR8888 framebuffer format, needed because the blitter writes 32-bit pixels.
   RGB565 stays the reset default, so M3 firmware behaves exactly as before.

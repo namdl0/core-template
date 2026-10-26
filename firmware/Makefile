@@ -20,6 +20,15 @@ SRCS    = common/crt0.S common/console.c common/dataslot.c common/libc_min.c hel
           ../sim/periph/model/blit_model.c ../sim/periph/model/adpcm.c
 
 all: ../src/fpga/core/fw/boot_b0.hex
+
+# SoC blitter benchmark (simulation only): make bench -> build/bench/boot_b{0..3}.hex,
+# run with: cd <dir containing sim/fw/boot_b*.hex> && Vvl_top $(cat preload.txt)  (tools/blitbench.py)
+bench: build/bench/boot_b0.hex
+build/bench/boot_b0.hex: common/crt0.S common/libc_min.c bench/main.c common/*.h common/link.ld
+	@mkdir -p build/bench
+	$(CC) $(CFLAGS) -DSIM $(LDFLAGS) -Wl,-Map,build/bench/bench.map -o build/bench/bench.elf common/crt0.S common/libc_min.c bench/main.c -lgcc
+	$(OBJCOPY) -O binary build/bench/bench.elf build/bench/bench.bin
+	$(PYTHON) ../tools/bin2hex.py build/bench/bench.bin build/bench/boot 32768
 sim: ../sim/fw/boot_b0.hex
 
 build/hello.elf: $(SRCS) common/*.h hello/*.h common/link.ld

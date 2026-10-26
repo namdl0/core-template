@@ -14,8 +14,10 @@
 // RAM read, matches the counters of that cycle.
 //
 // Fetch: at x == 0 of video line y (VB-1 <= y <= VB+V_ACTIVE-2), active line
-// y-VB+1 is requested. The sys side reads 24 (565) or 48 (8888) bursts of 32
-// bytes from fb_base + line*stride (line time is ~2400 sys clocks).
+// y-VB+1 is requested. The sys side reads 3 (565) or 6 (8888) bursts of 256
+// bytes from fb_base + line*stride (line time is ~2400 sys clocks; a 64-beat burst
+// costs 135 clocks). Lines start 256-byte aligned (FB_ADDR is 256-byte aligned and
+// both strides are multiples of 256), so a burst never crosses a 2 KB SDRAM row.
 //
 `default_nettype none
 
@@ -34,7 +36,7 @@ module vid_scanout #(
     output wire         p_valid,
     input  wire         p_ready,
     output wire [25:2]  p_addr,
-    output wire [2:0]   p_len,
+    output wire [5:0]   p_len,
     input  wire         p_rvalid,
     input  wire [31:0]  p_rdata,
 
@@ -106,16 +108,16 @@ end
     wire   req_pulse     = req_s[2] ^ req_s[1];
 
     reg        busy;
-    reg [5:0]  burst;           // 0..23 (565) or 0..47 (8888)
+    reg [2:0]  burst;           // 0..2 (565) or 0..5 (8888), 64 words each
     reg        lfmt;            // format of the line being fetched
     reg        issued;
-    reg [2:0]  beat;
+    reg [5:0]  beat;
     reg [7:0]  fline;
     reg [25:0] laddr;           // byte offset of the current line
 
     assign p_valid = busy && !issued;
-    assign p_addr  = laddr[25:2] + {15'd0, burst, 3'b000};
-    assign p_len   = 3'd7;
+    assign p_addr  = laddr[25:2] + {15'd0, burst, 6'b000000};
+    assign p_len   = 6'd63;
 
     // line buffer write
     wire [9:0] wadr = {fline[0], burst, beat};
@@ -134,21 +136,21 @@ always @(posedge clk_sys) begin
             // stride 768 = 512 + 256, or 1536 = 1024 + 512
             laddr  <= fmt32 ? fb_base + {req_line_v, 10'd0} + {1'b0, req_line_v, 9'd0}
                             : fb_base + {req_line_v, 9'd0}  + {1'b0, req_line_v, 8'd0};
-            burst  <= 6'd0;
-            beat   <= 3'd0;
+            burst  <= 3'd0;
+            beat   <= 6'd0;
             issued <= 1'b0;
         end
     end else begin
         if (p_ready) issued <= 1'b1;
         if (p_rvalid) begin
-            beat <= beat + 3'd1;
-            if (beat == 3'd7) begin
+            beat <= beat + 6'd1;
+            if (beat == 6'd63) begin
                 issued <= 1'b0;
-                if (burst == (lfmt ? 6'd47 : 6'd23)) begin
+                if (burst == (lfmt ? 3'd5 : 3'd2)) begin
                     busy <= 1'b0;
                     line <= fline;
                 end else
-                    burst <= burst + 6'd1;
+                    burst <= burst + 3'd1;
             end
         end
     end
