@@ -173,10 +173,34 @@ static void draw_live(uint16_t *fb, uint32_t frame, uint32_t keys)
     fb_fill_rect(fb, x, 192, 24, 16, (keys & KEY_A) ? C_CYAN : C_ORANGE);
 }
 
+/* Boot the game runtime when slot 6 (ufo50rt.bin) was loaded (docs/POCKET_RUNTIME.md):
+ * wait for the APF to finish loading, check the image's magic and size words, then jump.
+ * With no file (or garbage), fall through to the hello test screen. */
+static void try_boot_runtime(void)
+{
+    uint32_t t0 = rdcycle();
+    while (!(OS_STATUS & 2) && rdcycle() - t0 < SYS_CLK_HZ) { }     /* allcomplete, <= 1 s */
+    uint32_t sz;
+    if (!ds_slot_size(6, &sz) || sz < 16 || sz > RT_MAX_BYTES) return;
+    dcache_invalidate();
+    const volatile uint32_t *img = (const uint32_t *)(uintptr_t)SLOT6_ADDR;
+    if (img[1] != RT_MAGIC || img[2] < 16 || img[2] > sz) return;
+    DEBUG_OUT = 0xB0070000u | (img[2] >> 12);
+    __asm__ volatile ("csrw mie, zero");
+    __asm__ volatile ("csrci mstatus, 8");
+    icache_invalidate();                                            /* fence.i */
+    ((void (*)(void))(uintptr_t)SLOT6_ADDR)();
+}
+
 int main(void)
 {
     clk_hz = SYS_CLK_HZ;
     DEBUG_OUT = 0x00000001u;
+#ifndef SIM
+    try_boot_runtime();
+#else
+    if (CONT1_KEY & KEY_L3) try_boot_runtime();     /* tb: +boot6 drives L3 to exercise the loader */
+#endif
     con_init(C_NAVY);
     con_color(C_YELLOW, C_NAVY);
     con_puts("UFO50 Pocket SoC - M4 hello\n");

@@ -7,9 +7,11 @@
                 "id": 0,
                 "required": false,
                 "parameters": "0x00",
-                "extensions": ["gmp"],
+                "extensions": [
+                    "gmp"
+                ],
                 "filename": "ufo50.gmp",
-                "size_maximum": "0x02800000",
+                "size_maximum": "0x02400000",
                 "address": "0x10000000"
             },
             {
@@ -17,10 +19,12 @@
                 "id": 1,
                 "required": false,
                 "parameters": "0x00",
-                "extensions": ["gma"],
+                "extensions": [
+                    "gma"
+                ],
                 "filename": "ufo50.gma",
-                "size_maximum": "0x00800000",
-                "address": "0x12800000"
+                "size_maximum": "0x00400000",
+                "address": "0x12400000"
             },
             {
                 "name": "Texture Pack",
@@ -28,7 +32,9 @@
                 "required": false,
                 "deferload": true,
                 "parameters": "0x00",
-                "extensions": ["bin"],
+                "extensions": [
+                    "bin"
+                ],
                 "filename": "ufo50_tex.bin"
             },
             {
@@ -37,7 +43,9 @@
                 "required": false,
                 "deferload": true,
                 "parameters": "0x00",
-                "extensions": ["bin"],
+                "extensions": [
+                    "bin"
+                ],
                 "filename": "ufo50_snd.bin"
             },
             {
@@ -45,10 +53,57 @@
                 "id": 4,
                 "required": false,
                 "parameters": "0x00",
-                "extensions": ["txt"],
+                "extensions": [
+                    "txt"
+                ],
                 "filename": "english.txt",
+                "size_maximum": "0x00080000",
+                "address": "0x12800000"
+            },
+            {
+                "name": "Room Pack",
+                "id": 5,
+                "required": false,
+                "deferload": true,
+                "parameters": "0x00",
+                "extensions": [
+                    "bin"
+                ],
+                "filename": "ufo50_room.bin"
+            },
+            {
+                "name": "Runtime",
+                "id": 6,
+                "required": false,
+                "parameters": "0x00",
+                "extensions": [
+                    "bin"
+                ],
+                "filename": "ufo50rt.bin",
                 "size_maximum": "0x00100000",
-                "address": "0x13000000"
+                "address": "0x12880000"
+            },
+            {
+                "name": "Collision Masks",
+                "id": 7,
+                "required": false,
+                "deferload": true,
+                "parameters": "0x00",
+                "extensions": [
+                    "masks"
+                ],
+                "filename": "ufo50.masks"
+            },
+            {
+                "name": "Paths",
+                "id": 8,
+                "required": false,
+                "deferload": true,
+                "parameters": "0x00",
+                "extensions": [
+                    "paths"
+                ],
+                "filename": "ufo50.paths"
             },
             {
                 "name": "Save 1",
@@ -56,7 +111,9 @@
                 "required": false,
                 "nonvolatile": true,
                 "parameters": "0x00",
-                "extensions": ["ufo"],
+                "extensions": [
+                    "ufo"
+                ],
                 "filename": "save1.ufo",
                 "size_maximum": "0x00010000",
                 "address": "0x20000000"
@@ -67,7 +124,9 @@
                 "required": false,
                 "nonvolatile": true,
                 "parameters": "0x00",
-                "extensions": ["ufo"],
+                "extensions": [
+                    "ufo"
+                ],
                 "filename": "save2.ufo",
                 "size_maximum": "0x00010000",
                 "address": "0x20010000"
@@ -78,7 +137,9 @@
                 "required": false,
                 "nonvolatile": true,
                 "parameters": "0x00",
-                "extensions": ["ufo"],
+                "extensions": [
+                    "ufo"
+                ],
                 "filename": "save3.ufo",
                 "size_maximum": "0x00010000",
                 "address": "0x20020000"
@@ -89,7 +150,9 @@
                 "required": false,
                 "nonvolatile": true,
                 "parameters": "0x00",
-                "extensions": ["ufo"],
+                "extensions": [
+                    "ufo"
+                ],
                 "filename": "account.ufo",
                 "size_maximum": "0x00010000",
                 "address": "0x20030000"
@@ -100,7 +163,9 @@
                 "required": false,
                 "nonvolatile": true,
                 "parameters": "0x00",
-                "extensions": ["json"],
+                "extensions": [
+                    "json"
+                ],
                 "filename": "config.json",
                 "size_maximum": "0x00001000",
                 "address": "0x20040000"

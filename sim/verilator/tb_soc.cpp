@@ -170,6 +170,21 @@ int main(int argc, char **argv) {
     // +preload=<file>@<hex SDRAM byte offset>: raw little-endian bytes copied into the SDRAM model
     // before reset (benchmarks: firmware/bench). May be given several times.
     bool bench = false; long bench_bad = -1;
+    // +boot6=<file>: slot-6 boot test. The file (a tiny "U5RT" image, sim/verilator/boot6_stub.s)
+    // is preloaded at the slot-6 address, the APF size table reports it as slot 6, and L3 is held
+    // so the -DSIM hello firmware runs the loader. Pass criteria = bench mode (BENCH 01 == 0).
+    bool boot6 = false; uint32_t boot6_size = 0;
+    for (int i = 1; i < argc; i++) if (!strncmp(argv[i], "+boot6=", 7)) {
+        FILE *pf = fopen(argv[i] + 7, "rb");
+        if (!pf) { printf("cannot open %s\n", argv[i] + 7); return 1; }
+        std::vector<uint8_t> buf; uint8_t tmp[65536]; size_t n;
+        while ((n = fread(tmp, 1, sizeof tmp, pf)) > 0) buf.insert(buf.end(), tmp, tmp + n);
+        fclose(pf);
+        if (buf.size() & 1) buf.push_back(0);
+        for (size_t k = 0; k < buf.size(); k += 2) sd.set_hw(0x02880000u + (uint32_t)k, (uint16_t)(buf[k] | buf[k + 1] << 8));
+        boot6 = true; boot6_size = (uint32_t)buf.size(); bench = true;
+        printf("boot6: %u bytes at the slot-6 address\n", boot6_size);
+    }
     for (int i = 1; i < argc; i++) if (!strncmp(argv[i], "+preload=", 9)) {
         std::string a = argv[i] + 9; size_t at = a.rfind('@');
         uint32_t off = (uint32_t)strtoul(a.c_str() + at + 1, NULL, 16);
@@ -214,6 +229,7 @@ int main(int argc, char **argv) {
     top->clk_sys = 0; top->clk_vid = 0; top->clk_74a = 0;
     top->rst_mem = 1; top->reset_n = 0;
     top->cont1_key = 0x11;                 // UP + A held
+    if (boot6) top->cont1_key |= 1u << 12; // L3: the -DSIM hello firmware then runs the slot-6 loader
     top->eval();
 
     // clk_mem starts high so that its rising edges coincide with clk_sys rising edges (PLL)
@@ -335,7 +351,9 @@ int main(int argc, char **argv) {
                 // datatable: registered address + registered output
                 // edge E0: address changes; E1: address register; E2: output register -> q seen at E3
                 top->dt_q = dt_q1;
-                dt_q1 = (dt_addr_r == 1) ? (uint32_t)slot0.size() : 0;
+                dt_q1 = (dt_addr_r == 1) ? (uint32_t)slot0.size()
+                      : (boot6 && dt_addr_r == 2) ? 6u
+                      : (boot6 && dt_addr_r == 3) ? boot6_size : 0;
                 if (getenv("DT_DEBUG") && top->dt_addr != dt_addr_r) printf("[%.3f ms] dt_addr %u\n", t / 1e9, top->dt_addr);
                 dt_addr_r = top->dt_addr;
                 // bridge writes

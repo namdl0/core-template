@@ -9,6 +9,26 @@ and shows the M3 exit test on screen. The memory map and peripheral contract is
 The steps below assume Windows. Linux works the same way. Use `python3` instead
 of `py`, and `/media/...` instead of `E:\`.
 
+## M5 (branch `ufo50-m5`): fast SDRAM and the game runtime
+
+`ufo50-m5` = M4 plus:
+- **SDRAM at 115.5 MHz** (`soc/sdram_ctrl2x.v`, CL=3; bursts up to 64 beats): memory bandwidth roughly
+  doubles, the blitter's heavy frames drop from ~19 ms to ~7.4 ms in simulation. This is the part only real
+  hardware can prove: if the Pocket shows a wrong picture, flicker, or `SDRAM ... FAIL`, set `SDRAM_2X = 0`
+  in `src\fpga\core\core_top.v` (keeps the fast bursts on the old 57.75 MHz SDRAM clock) and recompile.
+- **A bootloader for the game runtime** (docs/POCKET_RUNTIME.md in the `ufo50-ap` repo): new data slot 6
+  loads `ufo50rt.bin` at `0x1288_0000`; the boot firmware checks its "U5RT" header and jumps to it. With no
+  `ufo50rt.bin` on the card the Pocket boots into the M4 hello screen exactly as before. New deferload
+  slots: 5 `ufo50_room.bin`, 7 `ufo50.masks`, 8 `ufo50.paths`; the asset index moved to `0x1240_0000` and
+  `english.txt` to `0x1280_0000` (data.json).
+
+Game files for the runtime go in `E:\Assets\ufo50\common\`: everything `tools/pocket_assets.py` writes to
+`build/pocket/` in the `ufo50-ap` repo (ufo50.gmp, ufo50.gma, english.txt, ufo50_tex.bin, ufo50_snd.bin,
+ufo50_room.bin, ufo50.masks, ufo50.paths) plus `ufo50rt.bin` from `make -C runtime pocket` there.
+
+Build and package exactly as for M4/M3 below (`git checkout ufo50-m5`). In the timing check, **both** `mp2`
+clocks (57.75 MHz `general[0]` and 115.5 MHz `general[1]`) must show positive setup slack.
+
 ## M4 (branch `ufo50-m4`): real blitter and audio mixer
 
 `ufo50-m4` = M3 + the hardware blitter and 32-voice mixer from `ufo50-periph` (`src/fpga/core/periph/`,

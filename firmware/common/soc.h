@@ -18,8 +18,11 @@
 
 /* default layout (firmware convention) */
 #define SLOT0_ADDR     0x10000000u
-#define SLOT1_ADDR     0x12800000u
-#define SLOT4_ADDR     0x13000000u
+#define SLOT1_ADDR     0x12400000u          /* compact boot layout (docs/POCKET_RUNTIME.md) */
+#define SLOT4_ADDR     0x12800000u
+#define SLOT6_ADDR     0x12880000u          /* ufo50rt.bin: the runtime image (slot 6) */
+#define RT_MAGIC       0x54523555u          /* "U5RT" at SLOT6_ADDR + 4 */
+#define RT_MAX_BYTES   0x00100000u
 #define HEAP_BASE      0x13100000u
 #define FB0_ADDR       0x13F80000u
 #define FB1_ADDR       0x13FC0000u
