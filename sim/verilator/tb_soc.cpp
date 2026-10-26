@@ -22,6 +22,12 @@
 #include <vector>
 
 static const double T_SYS = 17316.0;   // ps, 57.75 MHz
+static const double T_MEM = T_SYS / 2; // ps, 115.5 MHz SDRAM clock (M5, sdram_ctrl2x)
+#ifdef SDRAM_1X
+static const double T_SD = T_SYS;       // SDRAM on clk_sys (sdram_ctrl, build with -DSDRAM_1X)
+#else
+static const double T_SD = T_MEM;       // SDRAM on clk_mem
+#endif
 static const double T_VID = 81380.0;   // 12.288 MHz
 static const double T_74A = 13468.0;   // 74.25 MHz
 
@@ -119,7 +125,7 @@ struct Sdram {
                 s.d = mem[ha(ba, row[ba], (col & ~7) | ((col + j) & 7))];
             }
             reads++;
-            if (a & 0x400) { ap_at[ba] = now + bl * T_SYS; if (ap_at[ba] - t_act[ba] < 42000) ap_at[ba] = t_act[ba] + 42000; }
+            if (a & 0x400) { ap_at[ba] = now + bl * T_SD; if (ap_at[ba] - t_act[ba] < 42000) ap_at[ba] = t_act[ba] + 42000; }
             break; }
         case 4: {                                           // WRITE
             if (!open[ba]) err(now, "WRITE to a closed bank");
@@ -134,7 +140,7 @@ struct Sdram {
             wr_left = bl - 1; wr_bank = ba;
             if (bl == 1) t_wr[ba] = now;
             writes++;
-            if (a & 0x400) { ap_at[ba] = now + (bl - 1) * T_SYS + 14000; if (ap_at[ba] - t_act[ba] < 42000) ap_at[ba] = t_act[ba] + 42000; }
+            if (a & 0x400) { ap_at[ba] = now + (bl - 1) * T_SD + 14000; if (ap_at[ba] - t_act[ba] < 42000) ap_at[ba] = t_act[ba] + 42000; }
             break; }
         default: err(now, "unsupported command");
         }
@@ -210,7 +216,9 @@ int main(int argc, char **argv) {
     top->cont1_key = 0x11;                 // UP + A held
     top->eval();
 
-    double t = 0, n_sys = T_SYS / 2, n_vid = T_VID / 2, n_74 = T_74A / 2;
+    // clk_mem starts high so that its rising edges coincide with clk_sys rising edges (PLL)
+    double t = 0, n_sys = T_SYS / 2, n_mem = T_MEM / 2, n_vid = T_VID / 2, n_74 = T_74A / 2;
+    top->clk_mem = 1;
     double next_report = 10e9;
     long sys_cycles = 0;
     long d_start = 0, d_lat = 0, d_n = 0, i_start = 0, i_lat = 0, i_n = 0;
@@ -218,22 +226,30 @@ int main(int argc, char **argv) {
     bool d_open = false, i_open = false;
 
     while (!done && t < max_ms * 1e9) {
-        t = std::min(n_sys, std::min(n_vid, n_74));
+        t = std::min(std::min(n_sys, n_mem), std::min(n_vid, n_74));
         if (t >= 1e6) top->rst_mem = 0;
 
-        if (t == n_sys) {
-            n_sys += T_SYS / 2;
-            if (top->clk_sys) {
-                // falling edge = SDRAM rising edge
-                bool v;
-                top->sd_dq_in = sd.dq_for_capture(v);
-                top->clk_sys = 0;
-                top->eval();
+        bool e_sys = (t == n_sys), e_mem = (t == n_mem);
+        if (e_sys || e_mem) {
+            // apply simultaneous clk_sys / clk_mem edges together, as in hardware
+            bool sys_fall = e_sys && top->clk_sys, sys_rise = e_sys && !top->clk_sys;
+            bool mem_fall = e_mem && top->clk_mem;
+#ifdef SDRAM_1X
+            bool sd_edge = sys_fall;      // SDRAM rising edge = controller clock falling edge
+#else
+            bool sd_edge = mem_fall;
+#endif
+            if (e_sys) n_sys += T_SYS / 2;
+            if (e_mem) n_mem += T_MEM / 2;
+            if (sd_edge) { bool v; top->sd_dq_in = sd.dq_for_capture(v); }
+            if (e_sys) top->clk_sys = !top->clk_sys;
+            if (e_mem) top->clk_mem = !top->clk_mem;
+            top->eval();
+            if (sd_edge)
                 sd.clock(t, top->sd_ras_n, top->sd_cas_n, top->sd_we_n, top->sd_ba, top->sd_a,
                          top->sd_dqm, top->sd_dq_oe ? top->sd_dq_out : 0xFFFF, top->sd_cke);
-            } else {
-                top->clk_sys = 1;
-                top->eval();
+            (void)sys_fall;
+            if (sys_rise) {
                 sys_cycles++;
                 // D$ line refill latency (command accepted -> last beat), I$ refill (cmd -> 8th beat)
                 if (top->dbg_dline) { d_start = sys_cycles; d_open = true; }

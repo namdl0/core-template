@@ -12,7 +12,12 @@ set_clock_groups -asynchronous \
  -group { ic|mp1|mf_pllbase_inst|altera_pll_i|general[1].gpll~PLL_OUTPUT_COUNTER|divclk } \
  -group { ic|mp1|mf_pllbase_inst|altera_pll_i|general[2].gpll~PLL_OUTPUT_COUNTER|divclk } \
  -group { ic|mp1|mf_pllbase_inst|altera_pll_i|general[3].gpll~PLL_OUTPUT_COUNTER|divclk } \
- -group { ic|mp2|altera_pll_i|general[0].gpll~PLL_OUTPUT_COUNTER|divclk }
+ -group { ic|mp2|altera_pll_i|general[0].gpll~PLL_OUTPUT_COUNTER|divclk } \
+ -group { ic|mp2|altera_pll_i|general[1].gpll~PLL_OUTPUT_COUNTER|divclk }
+
+# M5: clk_mem (general[1], 115.5 MHz) and clk_sys only meet in the dual-clock FIFOs of
+# soc/sdram_ctrl2x.v (gray-code pointers + 2-flop synchronisers) and in 2-flop synchronisers
+# for reset/init_done, so the two are analysed as asynchronous groups above.
 
 # UFO50 M3 SDRAM interface. All SDRAM pins are driven/captured by IO-cell registers
 # (FAST_*_REGISTER in ap_core.qsf) clocked by clk_sys, and dram_clk is ~clk_sys from a

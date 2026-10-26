@@ -5,6 +5,7 @@
 `default_nettype none
 module vl_top (
     input  wire         clk_sys,
+    input  wire         clk_mem,        // 2 x clk_sys, rising edges aligned (SDRAM controller, M5)
     input  wire         clk_vid,
     input  wire         clk_74a,
     input  wire         rst_mem,
@@ -73,8 +74,13 @@ module vl_top (
         else aud_acc <= aud_acc + 21'd1024;
     end
 
-    ufo50_soc #(.BOOT_HEX("sim/fw/boot"), .SDRAM_INIT_CYCLES(16'd200)) soc (
-        .clk_sys(clk_sys), .rst_mem(rst_mem), .rst_sys(rst_sys),
+`ifdef SDRAM_1X
+    localparam SD2X = 0;
+`else
+    localparam SD2X = 1;
+`endif
+    ufo50_soc #(.BOOT_HEX("sim/fw/boot"), .SDRAM_INIT_CYCLES(16'd200), .SDRAM_2X(SD2X)) soc (
+        .clk_sys(clk_sys), .clk_mem(clk_mem), .rst_mem(rst_mem), .rst_sys(rst_sys),
         .sd_a(sd_a), .sd_ba(sd_ba), .sd_dqm(sd_dqm), .sd_cke(sd_cke), .sd_ras_n(sd_ras_n),
         .sd_cas_n(sd_cas_n), .sd_we_n(sd_we_n), .sd_dq_out(sd_dq_out), .sd_dq_oe(sd_dq_oe), .sd_dq_in(sd_dq_in),
         .clk_vid(clk_vid), .vid_x(hc), .vid_y(vc), .vid_fb_rgb(fb_rgb), .vid_mode(v_mode), .vid_border(border),

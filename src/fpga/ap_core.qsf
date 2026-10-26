@@ -745,6 +745,7 @@ set_global_assignment -name VERILOG_FILE core/mf_pllsys.v
 set_global_assignment -name VERILOG_FILE core/cpu/VexRiscv.v
 set_global_assignment -name VERILOG_FILE core/soc/ufo50_soc.v
 set_global_assignment -name VERILOG_FILE core/soc/sdram_ctrl.v
+set_global_assignment -name VERILOG_FILE core/soc/sdram_ctrl2x.v
 set_global_assignment -name VERILOG_FILE core/soc/sdram_arb.v
 set_global_assignment -name VERILOG_FILE core/soc/vid_scanout.v
 set_global_assignment -name VERILOG_FILE core/soc/bridge_sdram.v

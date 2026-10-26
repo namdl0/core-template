@@ -15,9 +15,11 @@
 module ufo50_soc #(
     parameter CLK_SYS_HZ  = 32'd57_750_000,
     parameter BOOT_HEX    = "core/fw/boot",     // boot_b0.hex .. boot_b3.hex (byte lanes)
-    parameter SDRAM_INIT_CYCLES = 16'd12000
+    parameter SDRAM_INIT_CYCLES = 16'd12000,      // clk_sys cycles (doubled for the 2x controller)
+    parameter SDRAM_2X    = 1                   // 1: sdram_ctrl2x on clk_mem = 2 x clk_sys; 0: sdram_ctrl
 )(
     input  wire         clk_sys,
+    input  wire         clk_mem,        // 2 x clk_sys, same PLL (unused if SDRAM_2X = 0)
     input  wire         rst_mem,        // PLL not locked: resets SDRAM ctrl and bridge path
     input  wire         rst_sys,        // also held while the APF holds reset_n low
 
@@ -152,6 +154,17 @@ sdram_arb #( .N(NP) ) arb (
     .c_wdata(c_wdata), .c_wstrb(c_wstrb), .c_wready(c_wready), .c_rdata(c_rdata), .c_rvalid(c_rvalid)
 );
 
+generate if (SDRAM_2X) begin : g_sd2x
+sdram_ctrl2x #( .INIT_CYCLES(SDRAM_INIT_CYCLES * 2) ) sdc (
+    .clk(clk_sys), .rst(rst_mem),
+    .cmd_valid(c_valid), .cmd_ready(c_ready), .cmd_we(c_we), .cmd_addr(c_addr), .cmd_len(c_len),
+    .wdata(c_wdata), .wstrb(c_wstrb), .wready(c_wready), .rdata(c_rdata), .rvalid(c_rvalid),
+    .idle(c_idle), .init_done(sd_init_done),
+    .clk_mem(clk_mem),
+    .sd_a(sd_a), .sd_ba(sd_ba), .sd_dqm(sd_dqm), .sd_cke(sd_cke), .sd_ras_n(sd_ras_n),
+    .sd_cas_n(sd_cas_n), .sd_we_n(sd_we_n), .sd_dq_out(sd_dq_out), .sd_dq_oe(sd_dq_oe), .sd_dq_in(sd_dq_in)
+);
+end else begin : g_sd1x
 sdram_ctrl #( .INIT_CYCLES(SDRAM_INIT_CYCLES) ) sdc (
     .clk(clk_sys), .rst(rst_mem),
     .cmd_valid(c_valid), .cmd_ready(c_ready), .cmd_we(c_we), .cmd_addr(c_addr), .cmd_len(c_len),
@@ -160,6 +173,7 @@ sdram_ctrl #( .INIT_CYCLES(SDRAM_INIT_CYCLES) ) sdc (
     .sd_a(sd_a), .sd_ba(sd_ba), .sd_dqm(sd_dqm), .sd_cke(sd_cke), .sd_ras_n(sd_ras_n),
     .sd_cas_n(sd_cas_n), .sd_we_n(sd_we_n), .sd_dq_out(sd_dq_out), .sd_dq_oe(sd_dq_oe), .sd_dq_in(sd_dq_in)
 );
+end endgenerate
 
 // ===========================================================================
 // Boot RAM: 32 KB, 4 byte lanes of 8192 x 8, port A = iBus (read), port B = dBus

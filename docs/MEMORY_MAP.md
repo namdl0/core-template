@@ -291,6 +291,12 @@ I$ invalidate: `fence.i`. The FPU must be enabled before use (`mstatus.FS`, done
   additions: module/file names `ufo50_blitter`/`ufo50_mixer`, a `present` output, and the arbiter port numbers.
   Registers: `VID_STATUS[23:16]` is the last fetched line (was "current line"); `VID_CTRL` reset value is 2
   (test pattern); new `SDRAM_STATUS` (0x120) and `DEBUG_OUT` (0xFFC); section 8 (runtime notes) added.
+- v0.5 (2026-10-25, branch `ufo50-m5`): **SDRAM on its own 115.5 MHz clock** (`soc/sdram_ctrl2x.v`, CL=3,
+  2 x clk_sys from the same PLL, dual-clock FIFOs to the clk_sys arbiter; `SDRAM_2X` in core_top selects it,
+  0 = the M4 controller). The port contract is unchanged; a beat now moves every clk_sys cycle, writes are
+  posted (the arbiter is released once the beats are queued) and an access costs ~n + 4 clk_sys cycles plus
+  ~4 cycles of FIFO latency. Benchmark: Barbuta 413k, library 438k blitter cycles per frame (from 946k /
+  1,005k in M4), bit-exact; CPU D$ line refill 30 -> 24 cycles.
 - v0.4 (2026-10-25, branch `ufo50-m5`): **SDRAM bursts up to 64 beats** within a 2 KB row (`mem_cmd_len` is
   6 bits), refresh every 300 cycles. Real Barbuta/library frames replayed on the SoC (`firmware/bench`,
   `tools/blitbench.py`): blitter time per frame 946k -> 710k / 1,005k -> 768k cycles, bit-exact.

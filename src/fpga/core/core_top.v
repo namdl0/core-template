@@ -629,13 +629,20 @@ always @(posedge clk_sys) aud_tick_s <= {aud_tick_s[1:0], aud_frame_t};
     localparam  SYS_FREQ_STR = "57.750000 MHz";
     localparam  SYS_FREQ_HZ  = 32'd57_750_000;
 
+    // M5: SDRAM in its own clock domain at 2 x clk_sys (soc/sdram_ctrl2x.v). Set SDRAM_2X to 0
+    // for the M3/M4 controller (SDRAM on clk_sys, CL=2); the 115.5 MHz clock then goes unused.
+    localparam  SDRAM_2X     = 1;
+    localparam  MEM_FREQ_STR = "115.500000 MHz";
+
     wire    clk_sys;
+    wire    clk_mem;
     wire    pll_sys_locked;
 
-mf_pllsys #( .OUT_FREQ(SYS_FREQ_STR) ) mp2 (
+mf_pllsys #( .OUT_FREQ(SYS_FREQ_STR), .OUT_FREQ1(MEM_FREQ_STR) ) mp2 (
     .refclk         ( clk_74a ),
     .rst            ( 1'b0 ),
     .outclk_0       ( clk_sys ),
+    .outclk_1       ( clk_mem ),
     .locked         ( pll_sys_locked )
 );
 
@@ -659,20 +666,23 @@ end
     wire        sd_dq_oe;
 assign dram_dq = sd_dq_oe ? sd_dq_out : {16{1'bZ}};
 
-// dram_clk = inverted clk_sys through a DDIO output register (same IO timing as the
-// command/data outputs): the SDRAM samples half a clock after the FPGA launches.
+// dram_clk = inverted SDRAM controller clock (clk_mem, or clk_sys without SDRAM_2X) through a
+// DDIO output register (same IO timing as the command/data outputs): the SDRAM samples half
+// a clock after the FPGA launches.
 pin_ddio_clk sdram_clk_out (
     .datain_h       ( 1'b0 ),
     .datain_l       ( 1'b1 ),
-    .outclock       ( clk_sys ),
+    .outclock       ( SDRAM_2X ? clk_mem : clk_sys ),
     .dataout        ( dram_clk )
 );
 
 ufo50_soc #(
     .CLK_SYS_HZ     ( SYS_FREQ_HZ ),
-    .BOOT_HEX       ( "core/fw/boot" )
+    .BOOT_HEX       ( "core/fw/boot" ),
+    .SDRAM_2X       ( SDRAM_2X )
 ) soc (
     .clk_sys        ( clk_sys ),
+    .clk_mem        ( clk_mem ),
     .rst_mem        ( rst_mem ),
     .rst_sys        ( rst_sys ),
 
