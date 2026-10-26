@@ -43,9 +43,13 @@ see them without a flush. When hardware writes SDRAM that the CPU will read thro
 ### Bridge (APF) address map
 
 Bridge writes in `0x1000_0000 - 0x13FF_FFFF` go to SDRAM (same addresses as the CPU's cached window).
-That is what the `address` fields of `data.json` and the `bridge address` parameter of target command
-`0x0180` refer to. `0xF8xx_xxxx` is the APF command space. Bridge reads of SDRAM are not supported in M3
-(return 0), so savestates / data-slot writes (0x0184) are a later milestone.
+That is what the `address` fields of `data.json` and the `bridge address` parameter of target commands
+`0x0180`/`0x0184` refer to. `0xF8xx_xxxx` is the APF command space. **Bridge reads** of the same range
+return the SDRAM contents (v0.6, `soc/bridge_sdram.v`): the APF reads them for data-slot writes (target
+command 0x0184) and when it writes the nonvolatile slots back to the card on quit/sleep/power-off. The
+read side keeps two 32-byte blocks and prefetches the next block, so a sequential read sequence is served
+without SDRAM latency after its first word; the blocks are invalidated by bridge writes and by any SDRAM
+write to the same 2 KB row (the CPU rewriting a save region is always seen). Savestates are not supported.
 
 ### Default SDRAM layout (firmware/runtime convention, not hardware)
 
@@ -58,6 +62,17 @@ That is what the `address` fields of `data.json` and the `bridge address` parame
 | `0x13F0_0000` | 512 KB | Reserved (blitter display lists, audio ring) |
 | `0x13F8_0000` | 256 KB | Framebuffer 0 |
 | `0x13FC_0000` | 256 KB | Framebuffer 1 |
+
+The game runtime (ufo50-ap `docs/POCKET_RUNTIME.md`) uses its own layout; the parts fixed by `data.json`
+(v0.6) are the **nonvolatile save slots**, loaded by the APF at boot and read back by it over the bridge:
+
+| CPU / bridge address | Size max | Slot | File (`/Saves/ufo50/common/`) |
+|---|---|---|---|
+| `0x13E4_0000` | 128 KB | 10 | `save1.ufo` |
+| `0x13E6_0000` | 128 KB | 11 | `save2.ufo` |
+| `0x13E8_0000` | 128 KB | 12 | `save3.ufo` |
+| `0x13EA_0000` | 64 KB | 13 | `account.ufo` |
+| `0x13EB_0000` | 64 KB | 14 | `config.json` |
 
 Note for the runtime team: 64 MB cannot hold the measured 70 MB resident heap; the `.gmp` has to be used
 in place (no copy) and/or per game overlays. The 2 x 16 MB PSRAM is not mapped in M3 (planned for 8 bpp
@@ -116,22 +131,29 @@ selected lanes (sel). Undefined offsets read 0.
 
 ### 3.2 Data-slot controller, base `0x8001_0000`
 
-Wraps APF target command `0x0180` (data slot read) and the data-slot size table. C driver:
-`firmware/common/dataslot.c`.
+Wraps APF target commands `0x0180` (data slot read), `0x0184` (data slot write) and `0x0188` (data slot
+flush) and the data-slot size table. C driver: `firmware/common/dataslot.c`.
 
 | Offset | Name | R/W | Description |
 |---|---|---|---|
 | `0x00` | `DS_SLOT_ID` | RW | slot id (16 bits) |
 | `0x04` | `DS_OFFSET` | RW | byte offset inside the slot file |
-| `0x08` | `DS_ADDR` | RW | destination: CPU address in `0x1000_0000 - 0x13FF_FFFF` (bridge address) |
+| `0x08` | `DS_ADDR` | RW | SDRAM side of the transfer: CPU address in `0x1000_0000 - 0x13FF_FFFF` (bridge address) |
 | `0x0C` | `DS_LENGTH` | RW | bytes |
-| `0x10` | `DS_CMD` | W | write 1 = start read (0x0180). Ignored while busy |
-| `0x14` | `DS_STATUS` | R | bit 0 busy, bit 1 done (sticky until next start), bit 2 error, `[10:8]` APF error code (`target_dataslot_err`), bit 16 `dataslot_allcomplete` |
-| `0x100 - 0x1FC` | `DS_TABLE[64]` | R | the APF data-slot size table (bridge `0xF800_2000`): word `2n` = slot id of entry n, word `2n+1` = size in bytes. Reads stall ~10 bus cycles (clock crossing) |
+| `0x10` | `DS_CMD` | RW | write **1** = start read (0x0180: slot file -> SDRAM), **2** = start write (0x0184: SDRAM -> slot file, the APF reads `DS_ADDR` over the bridge), **3** = flush (0x0188: write the slot back to the card; only `DS_SLOT_ID` is used). Ignored while busy; reads back the last command |
+| `0x14` | `DS_STATUS` | R | bit 0 busy, bit 1 done (sticky until next start), bit 2 error, `[10:8]` APF error code (`target_dataslot_err`: 0x0180/0x0184: 1 slot not defined, 2 error / out of range), bit 16 `dataslot_allcomplete` |
+| `0x100 - 0x1FC` | `DS_TABLE[64]` | **RW** | the APF data-slot size table (bridge `0xF800_2000`): word `2n` = slot id of entry n, word `2n+1` = size in bytes; the entries are in `data.json` order. Accesses stall ~10 bus cycles (clock crossing). Writable since v0.6: a nonvolatile slot's entry is what the APF writes back on quit/sleep/power-off |
 
-The APF writes the data through the bridge into SDRAM; the driver waits for `done`, then the CPU must
+Read: the APF writes the data through the bridge into SDRAM; the driver waits for `done`, then the CPU must
 **invalidate the D$** (or read through `0x5xxx_xxxx`) before reading the destination.
 Lengths and offsets: any multiple of 4 is safe; the APF handles the rest.
+
+Write (saves): the CPU puts the file in the slot's SDRAM region (write-through D$, so plain stores are fine),
+sets `DS_TABLE` size of the slot, then `DS_CMD = 2` with address/length (the APF reads the region through
+`bridge_rd`), optionally `DS_CMD = 3`. The table entry alone is enough for the APF's own write-back when the
+user quits the core, sleeps or powers off (the file is created if it did not exist). The runtime's
+`saves.c` in ufo50-ap documents the full protocol; `firmware/hello/main.c` tests it in `-DSIM` builds
+(`sim/verilator/tb_soc.cpp` models 0x0184/0x0188 and checks every word the APF read against its SDRAM model).
 
 ## 4. Peripheral slave windows (blitter, mixer): Wishbone B4 classic, 32-bit
 
@@ -275,7 +297,9 @@ I$ invalidate: `fence.i`. The FPU must be enabled before use (`mstatus.FS`, done
 - **Files**: slots loaded at boot are plain memory (`0x1000_0000`, `0x1280_0000`, `0x1300_0000`; sizes from
   `ds_slot_size()`). Deferload slots (2 texture pack, 3 audio pack) are read with `ds_read(id, offset, dst, len)`;
   `ds_read_start()`/`ds_busy()` allow overlapping the transfer with other work. The bridge delivers a few MB/s.
-  Saves (slots 10-14) need data-slot writes (0x0184) and bridge reads of SDRAM: not in M3.
+  Saves (slots 10-14): nonvolatile, loaded by the APF at boot into the regions in section 2; the runtime
+  writes them back with `DS_TABLE` + `DS_CMD` 2/3 (`ds_write()`, `ds_flush()`, `ds_table_set()` in
+  `firmware/common/dataslot.c`), v0.6.
 - **Time**: `rdcycle` (57.75 MHz) or `MTIME` (same clock, 64-bit). Frame pacing: `wait_vblank()` or the VBLANK
   IRQ; the video is exactly 60.000 Hz.
 - **Video**: draw RGB565 into the back buffer, write `FB_ADDR`, wait for `VID_STATUS.SWAP_PEND` = 0.
@@ -287,6 +311,11 @@ I$ invalidate: `fence.i`. The FPU must be enabled before use (`mstatus.FS`, done
 ## Changelog
 
 - v0.1 (2026-10-25): first draft.
+- v0.6 (2026-10-26, branch `ufo50-saves`): **saves**. Bridge reads of SDRAM (`bridge_sdram.v` read side with
+  block prefetch and row-snoop invalidation; SDRAM port 1 now reads and writes), `DS_CMD` values 2 (0x0184)
+  and 3 (0x0188, added to `core_bridge_cmd.v`), writable `DS_TABLE`, the save slot regions at `0x13E4_0000`
+  (`data.json`). No change to the peripheral contract or to the SDRAM clocking (`SDRAM_2X = 0`).
+  Verified in Verilator: hello (both SDRAM controllers), boot6, and the new 0x0184/0x0188 test.
 - v0.2 (2026-10-25): matches the implementation. **No change to the peripheral ports of sections 4-5**, only
   additions: module/file names `ufo50_blitter`/`ufo50_mixer`, a `present` output, and the arbiter port numbers.
   Registers: `VID_STATUS[23:16]` is the last fetched line (was "current line"); `VID_CTRL` reset value is 2

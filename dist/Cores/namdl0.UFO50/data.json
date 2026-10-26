@@ -115,8 +115,8 @@
                     "ufo"
                 ],
                 "filename": "save1.ufo",
-                "size_maximum": "0x00010000",
-                "address": "0x20000000"
+                "size_maximum": "0x00020000",
+                "address": "0x13E40000"
             },
             {
                 "name": "Save 2",
@@ -128,8 +128,8 @@
                     "ufo"
                 ],
                 "filename": "save2.ufo",
-                "size_maximum": "0x00010000",
-                "address": "0x20010000"
+                "size_maximum": "0x00020000",
+                "address": "0x13E60000"
             },
             {
                 "name": "Save 3",
@@ -141,8 +141,8 @@
                     "ufo"
                 ],
                 "filename": "save3.ufo",
-                "size_maximum": "0x00010000",
-                "address": "0x20020000"
+                "size_maximum": "0x00020000",
+                "address": "0x13E80000"
             },
             {
                 "name": "Account",
@@ -155,7 +155,7 @@
                 ],
                 "filename": "account.ufo",
                 "size_maximum": "0x00010000",
-                "address": "0x20030000"
+                "address": "0x13EA0000"
             },
             {
                 "name": "Config",
@@ -167,8 +167,8 @@
                     "json"
                 ],
                 "filename": "config.json",
-                "size_maximum": "0x00001000",
-                "address": "0x20040000"
+                "size_maximum": "0x00010000",
+                "address": "0x13EB0000"
             }
         ]
     }

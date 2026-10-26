@@ -128,6 +128,8 @@ module tb_soc;
         .sd_cas_n(sd_cas_n), .sd_we_n(sd_we_n), .sd_dq_out(sd_dq_out), .sd_dq_oe(sd_dq_oe), .sd_dq_in(dq_in),
         .clk_vid(clk_vid), .vid_x(hc), .vid_y(vc), .vid_fb_rgb(fb_rgb), .vid_mode(vmode), .vid_border(border),
         .clk_74a(clk_74a), .bridge_addr(bridge_addr), .bridge_wr(bridge_wr), .bridge_wr_data(bridge_wr_data),
+        .bridge_rd(1'b0), .bridge_rd_data(), .target_dataslot_write(), .target_dataslot_flush(),
+        .datatable_wren(), .datatable_data(),
         .target_dataslot_read(t_read), .target_dataslot_id(t_id), .target_dataslot_slotoffset(t_off),
         .target_dataslot_bridgeaddr(t_baddr), .target_dataslot_length(t_len),
         .target_dataslot_ack(t_ack), .target_dataslot_done(t_done), .target_dataslot_err(t_err),

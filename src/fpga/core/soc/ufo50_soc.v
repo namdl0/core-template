@@ -48,7 +48,11 @@ module ufo50_soc #(
     input  wire [31:0]  bridge_addr,
     input  wire         bridge_wr,
     input  wire [31:0]  bridge_wr_data,
+    input  wire         bridge_rd,
+    output wire [31:0]  bridge_rd_data,         // for bridge_addr in SDRAM (0x1xxx_xxxx), see bridge_sdram.v
     output wire         target_dataslot_read,
+    output wire         target_dataslot_write,
+    output wire         target_dataslot_flush,
     output wire [15:0]  target_dataslot_id,
     output wire [31:0]  target_dataslot_slotoffset,
     output wire [31:0]  target_dataslot_bridgeaddr,
@@ -57,6 +61,8 @@ module ufo50_soc #(
     input  wire         target_dataslot_done,
     input  wire [2:0]   target_dataslot_err,
     output wire [9:0]   datatable_addr,
+    output wire         datatable_wren,
+    output wire [31:0]  datatable_data,
     input  wire [31:0]  datatable_q,
     input  wire         dataslot_allcomplete,
     input  wire         osnotify_inmenu,
@@ -646,17 +652,19 @@ vid_scanout scan (
     assign p_wstrb[0*4 +: 4]   = 4'd0;
 
 // ===========================================================================
-// Bridge -> SDRAM writes (SDRAM port 1)
+// Bridge <-> SDRAM (SDRAM port 1): APF writes (slot loads) and reads (save write-back)
 // ===========================================================================
     wire bridge_idle;
 bridge_sdram bsd (
     .clk_74a(clk_74a), .bridge_addr(bridge_addr), .bridge_wr(bridge_wr), .bridge_wr_data(bridge_wr_data),
+    .bridge_rd(bridge_rd), .bridge_rd_data(bridge_rd_data),
     .clk_sys(clk_sys), .rst_sys(rst_mem),
-    .p_valid(p_valid[1]), .p_ready(p_ready[1]), .p_addr(p_addr[1*24 +: 24]), .p_len(p_len[1*6 +: 6]),
+    .p_valid(p_valid[1]), .p_ready(p_ready[1]), .p_we(p_we[1]), .p_addr(p_addr[1*24 +: 24]), .p_len(p_len[1*6 +: 6]),
     .p_wdata(p_wdata[1*32 +: 32]), .p_wstrb(p_wstrb[1*4 +: 4]), .p_wready(p_wready[1]),
+    .p_rdata(p_rdata), .p_rvalid(p_rvalid[1]),
+    .snoop_we(c_valid & c_ready & c_we), .snoop_addr(c_addr),
     .idle(bridge_idle)
 );
-    assign p_we[1] = 1'b1;
 
 // ===========================================================================
 // Data-slot controller (0x8001_0000)
@@ -667,11 +675,13 @@ dataslot_ctrl dsc (
     .wb_dat_r(ds_dat), .wb_ack(ds_ack),
     .bridge_idle(bridge_idle), .done_pulse(ds_irq_pulse),
     .clk_74a(clk_74a),
-    .target_dataslot_read(target_dataslot_read), .target_dataslot_id(target_dataslot_id),
+    .target_dataslot_read(target_dataslot_read), .target_dataslot_write(target_dataslot_write),
+    .target_dataslot_flush(target_dataslot_flush), .target_dataslot_id(target_dataslot_id),
     .target_dataslot_slotoffset(target_dataslot_slotoffset), .target_dataslot_bridgeaddr(target_dataslot_bridgeaddr),
     .target_dataslot_length(target_dataslot_length), .target_dataslot_ack(target_dataslot_ack),
     .target_dataslot_done(target_dataslot_done), .target_dataslot_err(target_dataslot_err),
-    .datatable_addr(datatable_addr), .datatable_q(datatable_q),
+    .datatable_addr(datatable_addr), .datatable_wren(datatable_wren), .datatable_data(datatable_data),
+    .datatable_q(datatable_q),
     .allcomplete(st_s[2])
 );
 

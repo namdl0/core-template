@@ -22,6 +22,10 @@
 #define SLOT4_ADDR     0x12800000u
 #define SLOT6_ADDR     0x12880000u          /* ufo50rt.bin: the runtime image (slot 6) */
 #define RT_MAGIC       0x54523555u          /* "U5RT" at SLOT6_ADDR + 4 */
+#define SAVE_BASE      0x13E40000u          /* nonvolatile slots 10-14 (data.json): save1-3.ufo 128 KB each at
+                                               +0x00000/+0x20000/+0x40000, account.ufo +0x60000, config.json +0x70000 */
+#define SAVE1_ADDR     (SAVE_BASE + 0x00000u)
+#define SAVE_SLOT1_ID  10
 #define RT_MAX_BYTES   0x00100000u
 #define HEAP_BASE      0x13100000u
 #define FB0_ADDR       0x13F80000u
@@ -100,6 +104,9 @@
 #define DS_STATUS_BUSY (1u << 0)
 #define DS_STATUS_DONE (1u << 1)
 #define DS_STATUS_ERR  (1u << 2)
+#define DS_CMD_READ    1u            /* target command 0x0180 */
+#define DS_CMD_WRITE   2u            /* 0x0184: APF reads DS_ADDR (SDRAM) over the bridge into the slot file */
+#define DS_CMD_FLUSH   3u            /* 0x0188: APF writes the slot back to the card */
 
 /* peripheral windows */
 #define BLIT_BASE      0x80020000u

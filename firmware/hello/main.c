@@ -261,6 +261,28 @@ int main(void)
     } else {
         label("     "); con_puts("slot0: no file, CRC skipped\n\n");
     }
+#ifdef SIM
+    /* 0x0184 (simulation only: on the Pocket this would overwrite a real save file): fill the save-1
+     * slot region with a pattern, publish its size in the APF table, and have the APF read it back
+     * over the bridge into "the file" (the testbench compares what it read with its SDRAM model) */
+    {
+        const uint32_t n = 4096;
+        volatile uint32_t *reg = (volatile uint32_t *)(uintptr_t)SAVE1_ADDR;
+        for (uint32_t i = 0; i < n / 4; i++) reg[i] = (i * 0x9E3779B9u) ^ 0x5A5A0000u ^ i;
+        int ti = ds_table_set(SAVE_SLOT1_ID, n);
+        int r = ds_write(SAVE_SLOT1_ID, 0, (const void *)(uintptr_t)SAVE1_ADDR, n);
+        int f = ds_flush(SAVE_SLOT1_ID);
+        /* overwrite the first block after the write: the next read-back must see the new data */
+        reg[0] ^= 0xFFFFFFFFu;
+        int r2 = ds_write(SAVE_SLOT1_ID, 0, (const void *)(uintptr_t)SAVE1_ADDR, 64);
+        label("     "); con_puts("0x0184 write "); con_dec(n); con_puts(" B: ");
+        if (r || f || r2 || ti < 0) { con_color(C_RED, C_NAVY); con_puts("APF error "); con_dec((uint32_t)-r);
+            con_putc('/'); con_dec((uint32_t)-f); con_putc('/'); con_dec((uint32_t)-r2); con_color(C_WHITE, C_NAVY); }
+        else pass(1);
+        con_putc('\n');
+        DEBUG_OUT = 0x00090000u | ((r || f || r2 || ti < 0) ? 1u : 0u);
+    }
+#endif
     DEBUG_OUT = 0x00000003u;
 
     /* ---- SDRAM */

@@ -78,6 +78,7 @@ input   wire            target_dataslot_read,       // rising edge triggered
 input   wire            target_dataslot_write,
 input   wire            target_dataslot_getfile,
 input   wire            target_dataslot_openfile,
+input   wire            target_dataslot_flush,      // 0x0188 (UFO50: save write-back)
 
 output  reg             target_dataslot_ack,        // asserted upon command start until completion
 output  reg             target_dataslot_done,       // asserted upon command finish until next command is issued    
@@ -184,6 +185,7 @@ localparam  [3:0]   TARG_ST_WAITRESULT_DSO  = 'd15;
     reg             target_dataslot_write_1, target_dataslot_write_queue;
     reg             target_dataslot_getfile_1, target_dataslot_getfile_queue;
     reg             target_dataslot_openfile_1, target_dataslot_openfile_queue;
+    reg             target_dataslot_flush_1, target_dataslot_flush_queue;
     
     
 initial begin
@@ -202,6 +204,7 @@ initial begin
     target_dataslot_write_queue <= 0;
     target_dataslot_getfile_queue <= 0;
     target_dataslot_openfile_queue <= 0;
+    target_dataslot_flush_queue <= 0;
     target_dataslot_ack <= 0;
     target_dataslot_done <= 0;
     target_dataslot_err <= 0;
@@ -216,6 +219,7 @@ always @(posedge clk) begin
     target_dataslot_write_1 <= target_dataslot_write;
     target_dataslot_getfile_1 <= target_dataslot_getfile;
     target_dataslot_openfile_1 <= target_dataslot_openfile;
+    target_dataslot_flush_1 <= target_dataslot_flush;
     
     if(status_setup_done & ~status_setup_done_1) begin
         status_setup_done_queue <= 1;
@@ -231,6 +235,9 @@ always @(posedge clk) begin
     end
     if(target_dataslot_openfile & ~target_dataslot_openfile_1) begin
         target_dataslot_openfile_queue <= 1;
+    end
+    if(target_dataslot_flush & ~target_dataslot_flush_1) begin
+        target_dataslot_flush_queue <= 1;
     end
     
     
@@ -519,6 +526,14 @@ always @(posedge clk) begin
             target_20 <= target_dataslot_id;
             target_24 <= target_buffer_param_struct; // pointer to the bram that will hold the parameter struct
                                                     // which must contain the desired filename and flag/size before command execution
+            tstate <= TARG_ST_DATASLOTOP;
+            
+        end else if(target_dataslot_flush_queue) begin
+            target_dataslot_flush_queue <= 0;
+            target_0[15:0] <= 16'h0188;
+            
+            target_20 <= target_dataslot_id;
+            
             tstate <= TARG_ST_DATASLOTOP;
         end 
     end

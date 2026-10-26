@@ -6,7 +6,11 @@
 //     the SDRAM samples on clk_sys falling edges; read data for edge n is presented to
 //     the FPGA's negedge capture at edge n+1 (the middle of the real CL=2 window).
 //   - APF emulation: slot 0 (256 bytes) written over the bridge while reset_n is low,
-//     data-slot size table (2-clock latency like mf_datatable), target command 0x0180.
+//     data-slot size table (2-clock latency like mf_datatable, writable by the core),
+//     target commands 0x0180 (read), 0x0184 (write: the APF reads the core's SDRAM over
+//     the bridge, one word per +rdgap= clk_74a cycles, sampling bridge_rd_data at the next
+//     strobe) and 0x0188 (flush: the write-back of the slot using the size-table entry, as
+//     on quit/sleep/power-off). What the APF read is compared with the SDRAM model.
 //   - video capture: sim/out/vl_frame_NN.ppm; frames of the live loop are compared
 //     pixel by pixel with the framebuffer contents in the SDRAM model.
 //
@@ -163,7 +167,9 @@ struct Sdram {
 int main(int argc, char **argv) {
     Verilated::commandArgs(argc, argv);
     double max_ms = 300;
+    int rd_gap = 150;      // clk_74a cycles between APF bridge read strobes (~2 us; the real APF is slower)
     for (int i = 1; i < argc; i++) if (!strncmp(argv[i], "+max_ms=", 8)) max_ms = atof(argv[i] + 8);
+    for (int i = 1; i < argc; i++) if (!strncmp(argv[i], "+rdgap=", 7)) rd_gap = atoi(argv[i] + 7);
 
     Vvl_top *top = new Vvl_top;
     Sdram sd;
@@ -211,9 +217,21 @@ int main(int argc, char **argv) {
     int b_gap = 0;
     bool loaded = false, released = false;
     int t_state = 0, t_wait = 0;
-    bool t_read_prev = false;
+    bool t_read_prev = false, t_write_prev = false, t_flush_prev = false;
     uint32_t dt_q1 = 0, dt_addr_r = 0;
-    int n0180 = 0;
+    uint32_t dt[64] = {};                 // the data-slot size table BRAM (word 2n id, 2n+1 size)
+    int n0180 = 0, n0184 = 0, n0188 = 0;
+    // bridge read job (0x0184 / flush): words read from the core's SDRAM over the bridge
+    struct RdJob { bool active = false; uint32_t addr = 0, len = 0, k = 0, id = 0; int wait = 0; bool strobed = false; int kind = 0; } rj;
+    long save_words = 0, save_bad = 0;
+    bool save_test_ran = false, save_test_fail = false;
+    // the slot address of save 1 (data.json) for the flush model
+    const uint32_t SAVE1_ADDR = 0x13E40000u;
+    auto sd_be_word = [&](uint32_t bridge_addr) -> uint32_t {   // big-endian word as the APF expects it
+        uint32_t off = bridge_addr & 0x3FFFFFF;
+        uint16_t lo = sd.hw(off), hi = sd.hw(off + 2);
+        return (uint32_t)(lo & 255) << 24 | (uint32_t)(lo >> 8) << 16 | (uint32_t)(hi & 255) << 8 | (hi >> 8);
+    };
 
     // video
     std::vector<uint32_t> cap(384 * 216);
@@ -278,6 +296,10 @@ int main(int argc, char **argv) {
                         printf("[%.3f ms] FIRMWARE TRAP mcause=%04x\n", t / 1e9, marker & 0xFFFF);
                         trapped = true; done = true;
                     } else if ((marker >> 16) == 1) live = marker & 0xFFFF;
+                    else if ((marker >> 16) == 9) {   /* save test (0x0184/0x0188) result from the firmware */
+                        save_test_ran = true; save_test_fail = (marker & 1) != 0;
+                        printf("[%.3f ms] firmware save test: %s\n", t / 1e9, save_test_fail ? "FAIL" : "ok");
+                    }
                     else if ((marker >> 24) == 0xBE) {   /* benchmark firmware: 0xBE tt vvvv (tag, value in units given by tag) */
                         uint32_t tg = (marker >> 16) & 0xFF, v = marker & 0xFFFF;
                         printf("[%.3f ms] BENCH %02x %u\n", t / 1e9, tg, v);
@@ -351,11 +373,28 @@ int main(int argc, char **argv) {
                 // datatable: registered address + registered output
                 // edge E0: address changes; E1: address register; E2: output register -> q seen at E3
                 top->dt_q = dt_q1;
-                dt_q1 = (dt_addr_r == 1) ? (uint32_t)slot0.size()
-                      : (boot6 && dt_addr_r == 2) ? 6u
-                      : (boot6 && dt_addr_r == 3) ? boot6_size : 0;
+                dt[1] = (uint32_t)slot0.size();
+                if (boot6) { dt[2] = 6u; dt[3] = boot6_size; }
+                dt_q1 = dt[dt_addr_r & 63];
+                if (top->dt_wren) { dt[top->dt_addr & 63] = top->dt_data;
+                    printf("[%.3f ms] APF: size table[%u] <= %u\n", t / 1e9, top->dt_addr, top->dt_data); }
                 if (getenv("DT_DEBUG") && top->dt_addr != dt_addr_r) printf("[%.3f ms] dt_addr %u\n", t / 1e9, top->dt_addr);
                 dt_addr_r = top->dt_addr;
+                // bridge reads (0x0184 / flush): strobe word k, sample bridge_rd_data at the next strobe
+                top->bridge_rd = 0;
+                if (rj.active) {
+                    if (rj.wait > 0) rj.wait--;
+                    else {
+                        if (rj.strobed) {   // the previous strobe's data is on bridge_rd_data now
+                            uint32_t got = top->bridge_rd_data, want = sd_be_word(rj.addr + 4 * (rj.k - 1));
+                            save_words++;
+                            if (got != want) { if (save_bad < 10) printf("[%.3f ms] APF: bridge read %08x: got %08x want %08x\n", t / 1e9, rj.addr + 4 * (rj.k - 1), got, want); save_bad++; }
+                        }
+                        if (rj.k * 4 < rj.len) {
+                            top->bridge_addr = rj.addr + 4 * rj.k; top->bridge_rd = 1; rj.strobed = true; rj.k++; rj.wait = rd_gap;
+                        } else rj.active = false;
+                    }
+                }
                 // bridge writes
                 top->bridge_wr = 0;
                 if (b_gap > 0) b_gap--;
@@ -375,25 +414,38 @@ int main(int argc, char **argv) {
                     top->reset_n = 1; released = true;
                     printf("[%.3f ms] APF: reset_n released\n", t / 1e9);
                 }
-                // target command 0x0180
-                bool tr = top->t_read;
-                if (tr && !t_read_prev && t_state == 0) { t_state = 1; t_wait = 4; n0180++; }
-                t_read_prev = tr;
+                // target commands 0x0180 (read), 0x0184 (write), 0x0188 (flush)
+                bool tr = top->t_read, tw = top->t_write, tf = top->t_flush;
+                static int t_cmd = 0;
+                if (tr && !t_read_prev && t_state == 0) { t_state = 1; t_wait = 4; n0180++; t_cmd = 0x180; }
+                if (tw && !t_write_prev && t_state == 0) { t_state = 1; t_wait = 4; n0184++; t_cmd = 0x184; }
+                if (tf && !t_flush_prev && t_state == 0) { t_state = 1; t_wait = 4; n0188++; t_cmd = 0x188; }
+                t_read_prev = tr; t_write_prev = tw; t_flush_prev = tf;
                 switch (t_state) {
                 case 1: if (--t_wait == 0) { top->t_done = 0; t_state = 2; t_wait = 30; } break;
                 case 2:
                     if (--t_wait == 0) {
                         top->t_ack = 1;
-                        for (uint32_t k = 0; k < top->t_len; k += 4)
-                            bq.push_back({top->t_baddr + k, top->t_id == 0 ? slot_word(top->t_off + k) : 0xFFFFFFFFu});
+                        if (t_cmd == 0x180) {
+                            for (uint32_t k = 0; k < top->t_len; k += 4)
+                                bq.push_back({top->t_baddr + k, top->t_id == 0 ? slot_word(top->t_off + k) : 0xFFFFFFFFu});
+                        } else if (t_cmd == 0x184) {
+                            rj = RdJob(); rj.active = true; rj.addr = top->t_baddr; rj.len = top->t_len; rj.id = top->t_id; rj.wait = 20;
+                        } else {   // flush: write the slot back from its address, size from the table (as on quit)
+                            uint32_t sz = 0;
+                            for (int e = 0; e < 32; e++) if ((dt[2 * e] & 0xFFFF) == top->t_id && dt[2 * e + 1]) sz = dt[2 * e + 1];
+                            rj = RdJob(); rj.active = sz != 0; rj.addr = SAVE1_ADDR; rj.len = sz; rj.id = top->t_id; rj.wait = 20;
+                            printf("[%.3f ms] APF: 0x0188 slot %u: table size %u\n", t / 1e9, top->t_id, sz);
+                        }
                         t_state = 3;
                     }
                     break;
                 case 3:
-                    if (bq.empty() && b_gap == 0) {
-                        top->t_ack = 0; top->t_err = top->t_id == 0 ? 0 : 2; top->t_done = 1; t_state = 0;
-                        printf("[%.3f ms] APF: 0x0180 slot %u off %u -> %08x len %u done\n",
-                               t / 1e9, top->t_id, top->t_off, top->t_baddr, top->t_len);
+                    if (bq.empty() && b_gap == 0 && !rj.active) {
+                        bool ok = t_cmd == 0x180 ? top->t_id == 0 : (top->t_id == 10 && save_bad == 0);
+                        top->t_ack = 0; top->t_err = ok ? 0 : 2; top->t_done = 1; t_state = 0;
+                        printf("[%.3f ms] APF: 0x%04x slot %u off %u -> %08x len %u done%s\n",
+                               t / 1e9, t_cmd, top->t_id, top->t_off, top->t_baddr, top->t_len, ok ? "" : " (error)");
                     }
                     break;
                 }
@@ -411,10 +463,13 @@ int main(int argc, char **argv) {
     printf("SDRAM model: %ld errors, %ld reads, %ld writes, %ld refreshes\n", sd.errors, sd.reads, sd.writes, sd.refs);
     printf("frames compared %d, pixel mismatches %ld, live frames %u, 0x0180 commands %d, sim time %.2f ms\n",
            cmp_frames, mismatches, live, n0180, t / 1e9);
+    printf("save write-back: %d x 0x0184, %d x 0x0188, %ld words read over the bridge, %ld wrong, firmware test %s\n",
+           n0184, n0188, save_words, save_bad, save_test_ran ? (save_test_fail ? "FAIL" : "PASS") : "not run");
     printf("D$ line refills %ld, avg %.1f cycles; I$ line refills %ld, avg %.1f cycles (incl. boot RAM)\n",
            d_n, d_n ? (double)d_lat / d_n : 0.0, i_n, i_n ? (double)i_lat / i_n : 0.0);
-    bool pass = bench ? (!trapped && sd.errors == 0 && bench_bad == 0)
-                      : (!trapped && sd.errors == 0 && mismatches == 0 && cmp_frames >= 2 && live >= 3 && n0180 >= 1);
+    bool save_ok = save_bad == 0 && !save_test_fail && (bench || (save_test_ran && n0184 >= 2 && n0188 >= 1 && save_words > 0));
+    bool pass = bench ? (!trapped && sd.errors == 0 && bench_bad == 0 && save_ok)
+                      : (!trapped && sd.errors == 0 && mismatches == 0 && cmp_frames >= 2 && live >= 3 && n0180 >= 1 && save_ok);
     printf(pass ? "TB_SOC PASS\n" : "TB_SOC FAIL\n");
     top->final();
     delete top;

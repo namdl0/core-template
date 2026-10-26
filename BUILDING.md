@@ -261,9 +261,11 @@ sh sim/verilator/run.sh      # M3 SoC: firmware boots, draws the framebuffer, fr
 
 `sim/verilator/run.sh` builds the `-DSIM` firmware (smaller tests), Verilates the SoC with the CPU, and runs it
 with a cycle-based SDRAM model that checks SDRAM timing, an emulated APF (slot 0 loaded over the bridge
-during reset, the data-slot size table, target command 0x0180) and the real video timing. It writes the
+during reset, the data-slot size table, target commands 0x0180, 0x0184 and 0x0188 with the APF's bridge
+reads of SDRAM checked word by word) and the real video timing. It writes the
 displayed frames to `sim/out/vl_frame_NN.ppm` and compares every frame of the live loop pixel by pixel with the
-framebuffer in SDRAM. It ends with `TB_SOC PASS`. `sim/tb_soc.v` is the same test for Icarus Verilog
+framebuffer in SDRAM. It ends with `TB_SOC PASS` (the full hello run needs `+max_ms=1000`; `SDRAM_1X=1`
+simulates the `SDRAM_2X = 0` controller the Pocket build uses; `+boot6=<image>` runs the slot-6 loader test). `sim/tb_soc.v` is the same test for Icarus Verilog
 (`iverilog -g2012`), with a timing-accurate SDRAM model, but it runs at ~2k CPU cycles per second, so it only
 gets through the boot in reasonable time.
 
@@ -280,11 +282,29 @@ bridge path keep running during reset). Bridge address = CPU address (`docs/MEMO
 | 2 | Texture Pack | `ufo50_tex.bin` | `deferload`: the CPU reads it with target command 0x0180 (`ds_read()`) |
 | 3 | Audio Pack | `ufo50_snd.bin` | `deferload` |
 | 4 | Text | `english.txt` | loaded to **0x13000000**, max 1 MB |
-| 10-12 | Save 1-3 | `save1.ufo` .. `save3.ufo` | nonvolatile, 64 KB each, bridge 0x20000000+ (not wired yet, M7) |
-| 13 | Account | `account.ufo` | nonvolatile (M7) |
-| 14 | Config | `config.json` | nonvolatile, 4 KB (M7) |
+| 5, 7, 8 | Room Pack, Collision Masks, Paths | `ufo50_room.bin`, `ufo50.masks`, `ufo50.paths` | `deferload` |
+| 6 | Runtime | `ufo50rt.bin` | loaded to **0x12880000**, max 1 MB |
+| 10-12 | Save 1-3 | `save1.ufo` .. `save3.ufo` | **nonvolatile**, max 128 KB each, loaded to **0x13E40000 / 0x13E60000 / 0x13E80000** |
+| 13 | Account | `account.ufo` | nonvolatile, max 64 KB, **0x13EA0000** |
+| 14 | Config | `config.json` | nonvolatile, max 64 KB, **0x13EB0000** |
 
 Asset files go in `/Assets/ufo50/common/` and saves in `/Saves/ufo50/common/`, the
-platform-shared locations (parameters bit 1 is clear). Bridge reads (needed by the APF to write
-nonvolatile slots back to the SD card) return 0 in M3, so **don't put real save files in
-`/Saves/ufo50/` yet**.
+platform-shared locations (parameters bit 1 is clear).
+
+### Saves (branch `ufo50-saves`)
+
+The nonvolatile slots work like every other openFPGA core's battery save: the APF loads the files that exist
+in `/Saves/ufo50/common/` into SDRAM before the core starts, and when you **quit the core from the Pocket
+menu, put the Pocket to sleep or power it off**, it reads each slot's region back over the bridge and writes
+it to the card, with the size the core put in the data-slot size table. **No file has to exist beforehand**:
+the first save creates `save1.ufo` etc. In addition the runtime issues target command 0x0184 (and 0x0188)
+right after the game saves (debounced, ufo50-ap `runtime/pocket/saves.c`), so the card is current even if
+the battery dies without a clean quit. Hardware side: `soc/bridge_sdram.v` serves the APF's bridge reads
+from SDRAM, `soc/dataslot_ctrl.v` issues 0x0184/0x0188 and writes the size table (`docs/MEMORY_MAP.md` 3.2).
+Nothing changes in the SDRAM clocking (`SDRAM_2X = 0`); compile, package and copy as for M5.
+
+To check it on the Pocket: play until the game saves (profile selection writes `config.json`, playing a
+game writes `save1.ufo`), quit the core through the Pocket menu, and look for the files in
+`/Saves/ufo50/common/` on the card (they are the same format as the PC's `save/` files). Then start the
+core again: the profile and progress are back. A save file copied from the PC version into that folder
+is picked up too.

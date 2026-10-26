@@ -314,10 +314,9 @@ always @(*) begin
     default: begin
         bridge_rd_data <= 0;
     end
-    32'h10xxxxxx: begin
-        // example
-        // bridge_rd_data <= example_device_data;
-        bridge_rd_data <= 0;
+    32'h1xxxxxxx: begin
+        // SDRAM 0x1000_0000-0x13FF_FFFF: data-slot write-back (0x0184, nonvolatile flush), soc/bridge_sdram.v
+        bridge_rd_data <= soc_bridge_rd_data;
     end
     32'hF8xxxxxx: begin
         bridge_rd_data <= cmd_bridge_rd_data;
@@ -383,7 +382,9 @@ end
 // synchronous to clk_74a
 
     wire            target_dataslot_read;       // driven by soc/dataslot_ctrl.v
-    wire            target_dataslot_write = 1'b0;
+    wire            target_dataslot_write;      // driven by soc/dataslot_ctrl.v (0x0184)
+    wire            target_dataslot_flush;      // driven by soc/dataslot_ctrl.v (0x0188)
+    wire    [31:0]  soc_bridge_rd_data;         // SDRAM contents for bridge reads (soc/bridge_sdram.v)
     wire            target_dataslot_getfile = 1'b0;    // require additional param/resp structs to be mapped
     wire            target_dataslot_openfile = 1'b0;   // require additional param/resp structs to be mapped
     
@@ -402,9 +403,9 @@ end
 // bridge data slot access
 // synchronous to clk_74a
 
-    wire    [9:0]   datatable_addr;             // driven by soc/dataslot_ctrl.v (read only)
-    wire            datatable_wren = 1'b0;
-    wire    [31:0]  datatable_data = 32'd0;
+    wire    [9:0]   datatable_addr;             // driven by soc/dataslot_ctrl.v (DS_TABLE reads and writes)
+    wire            datatable_wren;
+    wire    [31:0]  datatable_data;
     wire    [31:0]  datatable_q;
 
 core_bridge_cmd icb (
@@ -468,6 +469,7 @@ core_bridge_cmd icb (
     .target_dataslot_write      ( target_dataslot_write ),
     .target_dataslot_getfile    ( target_dataslot_getfile ),
     .target_dataslot_openfile   ( target_dataslot_openfile ),
+    .target_dataslot_flush      ( target_dataslot_flush ),
     
     .target_dataslot_ack        ( target_dataslot_ack ),
     .target_dataslot_done       ( target_dataslot_done ),
@@ -708,7 +710,11 @@ ufo50_soc #(
     .bridge_addr    ( bridge_addr ),
     .bridge_wr      ( bridge_wr ),
     .bridge_wr_data ( bridge_wr_data ),
+    .bridge_rd      ( bridge_rd ),
+    .bridge_rd_data ( soc_bridge_rd_data ),
     .target_dataslot_read       ( target_dataslot_read ),
+    .target_dataslot_write      ( target_dataslot_write ),
+    .target_dataslot_flush      ( target_dataslot_flush ),
     .target_dataslot_id         ( target_dataslot_id ),
     .target_dataslot_slotoffset ( target_dataslot_slotoffset ),
     .target_dataslot_bridgeaddr ( target_dataslot_bridgeaddr ),
@@ -717,6 +723,8 @@ ufo50_soc #(
     .target_dataslot_done       ( target_dataslot_done ),
     .target_dataslot_err        ( target_dataslot_err ),
     .datatable_addr             ( datatable_addr ),
+    .datatable_wren             ( datatable_wren ),
+    .datatable_data             ( datatable_data ),
     .datatable_q                ( datatable_q ),
     .dataslot_allcomplete       ( dataslot_allcomplete ),
     .osnotify_inmenu            ( osnotify_inmenu ),

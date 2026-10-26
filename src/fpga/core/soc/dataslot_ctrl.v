@@ -1,10 +1,15 @@
 //
-// dataslot_ctrl.v - CPU access to APF data slots (UFO50 Pocket SoC, M3)
+// dataslot_ctrl.v - CPU access to APF data slots (UFO50 Pocket SoC, M3; writes added for saves)
 //
 // MMIO window 0x8001_0000 (registers: docs/MEMORY_MAP.md section 3.2):
 //   - target command 0x0180 "data slot read": the APF reads <length> bytes at
 //     <offset> of slot <id> and writes them over the bridge to <addr> (SDRAM).
-//   - DS_TABLE: read-only view of the APF data-slot size table (bridge 0xF8002000).
+//   - target command 0x0184 "data slot write": the APF reads <length> bytes over the
+//     bridge from <addr> (SDRAM, served by bridge_sdram) and writes them at <offset>
+//     of the slot's file on the SD card.
+//   - target command 0x0188 "data slot flush": the APF writes the slot back to the card.
+//   - DS_TABLE: the APF data-slot size table (bridge 0xF800_2000), readable and
+//     writable (a nonvolatile slot's size is what the APF writes back on quit).
 //
 // Clock crossing: parameters are written in clk_sys and only change while idle;
 // start/done/table requests cross as toggles (2-3 flop synchronisers).
@@ -28,6 +33,8 @@ module dataslot_ctrl (
 
     input  wire         clk_74a,
     output reg          target_dataslot_read,
+    output reg          target_dataslot_write,
+    output reg          target_dataslot_flush,
     output wire [15:0]  target_dataslot_id,
     output wire [31:0]  target_dataslot_slotoffset,
     output wire [31:0]  target_dataslot_bridgeaddr,
@@ -36,6 +43,8 @@ module dataslot_ctrl (
     input  wire         target_dataslot_done,
     input  wire [2:0]   target_dataslot_err,
     output reg  [9:0]   datatable_addr,
+    output reg          datatable_wren,
+    output reg  [31:0]  datatable_data,
     input  wire [31:0]  datatable_q
 );
 
@@ -44,9 +53,12 @@ module dataslot_ctrl (
     reg [31:0] r_off, r_addr, r_len;
     reg        busy, done, err;
     reg [2:0]  errcode;
+    reg [1:0]  cmd;                 // 1 read, 2 write, 3 flush
     reg        start_t;
     reg        tbl_req_t;
     reg [5:0]  tbl_idx;
+    reg        tbl_we;
+    reg [31:0] tbl_wdata;
     reg        tbl_wait;
     reg        fin_pend;            // APF finished, waiting for the bridge path to drain
 
@@ -75,6 +87,7 @@ always @(posedge clk_sys) begin
         done      <= 1'b0;
         err       <= 1'b0;
         errcode   <= 3'd0;
+        cmd       <= 2'd1;
         tbl_wait  <= 1'b0;
         fin_pend  <= 1'b0;
         r_id <= 16'd0; r_off <= 32'd0; r_addr <= 32'h1000_0000; r_len <= 32'd0;
@@ -94,6 +107,8 @@ always @(posedge clk_sys) begin
                 if (!tbl_wait) begin
                     tbl_wait  <= 1'b1;
                     tbl_idx   <= wb_adr[7:2];
+                    tbl_we    <= wb_we;
+                    tbl_wdata <= wb_dat_w;
                     tbl_req_t <= ~tbl_req_t;
                 end else if (tack_s[2] ^ tack_s[1]) begin
                     tbl_wait <= 1'b0;
@@ -108,10 +123,11 @@ always @(posedge clk_sys) begin
                     8'h04: r_off  <= wb_dat_w;
                     8'h08: r_addr <= wb_dat_w;
                     8'h0C: r_len  <= wb_dat_w;
-                    8'h10: if (wb_dat_w[0]) begin
+                    8'h10: if (wb_dat_w[1:0] != 2'd0) begin
                                busy    <= 1'b1;
                                done    <= 1'b0;
                                err     <= 1'b0;
+                               cmd     <= wb_dat_w[1:0];
                                start_t <= ~start_t;
                            end
                     default: ;
@@ -122,6 +138,7 @@ always @(posedge clk_sys) begin
                     8'h04: wb_dat_r <= r_off;
                     8'h08: wb_dat_r <= r_addr;
                     8'h0C: wb_dat_r <= r_len;
+                    8'h10: wb_dat_r <= {30'd0, cmd};
                     8'h14: wb_dat_r <= {15'd0, allcomplete, 5'd0, errcode, 5'd0, err, done, busy};
                     default: wb_dat_r <= 32'd0;
                     endcase
@@ -137,7 +154,11 @@ end
     reg [2:0] start_s, treq_s;
     reg [1:0] st;
     reg [2:0] tst;
-    initial begin fin_t_74 = 1'b0; tbl_ack_t_74 = 1'b0; st = 2'd0; tst = 3'd0; target_dataslot_read = 1'b0; end
+    initial begin
+        fin_t_74 = 1'b0; tbl_ack_t_74 = 1'b0; st = 2'd0; tst = 3'd0;
+        target_dataslot_read = 1'b0; target_dataslot_write = 1'b0; target_dataslot_flush = 1'b0;
+        datatable_wren = 1'b0;
+    end
 
 always @(posedge clk_74a) begin
     start_s <= {start_s[1:0], start_t};
@@ -145,11 +166,16 @@ always @(posedge clk_74a) begin
 
     case (st)
     2'd0: if (start_s[2] ^ start_s[1]) begin
-        target_dataslot_read <= 1'b1;         // rising edge starts 0x0180
+        // rising edge starts the target command (cmd is stable: written before start_t toggled)
+        target_dataslot_read  <= (cmd == 2'd1);
+        target_dataslot_write <= (cmd == 2'd2);
+        target_dataslot_flush <= (cmd == 2'd3);
         st <= 2'd1;
     end
     2'd1: if (!target_dataslot_done) begin    // core_bridge_cmd cleared the previous done
-        target_dataslot_read <= 1'b0;
+        target_dataslot_read  <= 1'b0;
+        target_dataslot_write <= 1'b0;
+        target_dataslot_flush <= 1'b0;
         st <= 2'd2;
     end
     2'd2: if (target_dataslot_done) begin
@@ -160,10 +186,13 @@ always @(posedge clk_74a) begin
     default: st <= 2'd0;
     endcase
 
-    // size table reads (port A of mf_datatable, 2 clock read latency)
+    // size table access (port A of mf_datatable, 2 clock read latency)
+    datatable_wren <= 1'b0;
     case (tst)
     3'd0: if (treq_s[2] ^ treq_s[1]) begin
         datatable_addr <= {4'd0, tbl_idx};    // stable while the request is pending
+        datatable_data <= tbl_wdata;
+        datatable_wren <= tbl_we;
         tst <= 3'd1;
     end
     3'd1: tst <= 3'd2;                        // mf_datatable: registered address and output,
