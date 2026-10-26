@@ -277,11 +277,11 @@ bridge path keep running during reset). Bridge address = CPU address (`docs/MEMO
 
 | id | name | file | mode |
 |---|---|---|---|
-| 0 | Program | `ufo50.gmp` | loaded to **0x10000000** (SDRAM), max 40 MB |
-| 1 | Asset Index | `ufo50.gma` | loaded to **0x12800000**, max 8 MB |
+| 0 | Program | `ufo50.gmp` | loaded to **0x10000000** (SDRAM), max 36 MB |
+| 1 | Asset Index | `ufo50.gma` | loaded to **0x12400000**, max 4 MB |
 | 2 | Texture Pack | `ufo50_tex.bin` | `deferload`: the CPU reads it with target command 0x0180 (`ds_read()`) |
 | 3 | Audio Pack | `ufo50_snd.bin` | `deferload` |
-| 4 | Text | `english.txt` | loaded to **0x13000000**, max 1 MB |
+| 4 | Text | `english.txt` | loaded to **0x12800000**, max 512 KB |
 | 5, 7, 8 | Room Pack, Collision Masks, Paths | `ufo50_room.bin`, `ufo50.masks`, `ufo50.paths` | `deferload` |
 | 6 | Runtime | `ufo50rt.bin` | loaded to **0x12880000**, max 1 MB |
 | 10-12 | Save 1-3 | `save1.ufo` .. `save3.ufo` | **nonvolatile**, max 128 KB each, loaded to **0x13E40000 / 0x13E60000 / 0x13E80000** |
