@@ -36,6 +36,9 @@
 
 // ------------------------------------------------------------------ dual-clock FIFO
 // First-word-fall-through: r_valid/r_data show the head; r_pop consumes it.
+// Timing (115.5 MHz side): the head is a register loaded by a synchronous RAM read (no
+// combinational read mux on r_data), and the synchronised gray pointers are converted to
+// binary in their own register stage, so no gray->binary chain feeds the count arithmetic.
 module afifo #(
     parameter W  = 32,
     parameter AW = 4                       // depth 2^AW
@@ -55,6 +58,8 @@ module afifo #(
     reg [W-1:0] mem [0:(1<<AW)-1];
     reg [AW:0]  wp_bin, wp_gray, rp_bin, rp_gray;
     reg [AW:0]  wp_gray_s1, wp_gray_s2, rp_gray_s1, rp_gray_s2;
+    reg [AW:0]  wp_bin_s, rp_bin_s;                  // synchronised pointers, binary
+    reg [W-1:0] head;
 
     function [AW:0] g2b(input [AW:0] g);
         integer i;
@@ -68,24 +73,31 @@ module afifo #(
     wire [AW:0] wp_next = wp_bin + 1'b1;
     always @(posedge w_clk) begin
         if (w_push) mem[wp_bin[AW-1:0]] <= w_data;
-        if (w_rst) begin wp_bin <= 0; wp_gray <= 0; rp_gray_s1 <= 0; rp_gray_s2 <= 0; w_free <= (1 << AW); end
+        if (w_rst) begin wp_bin <= 0; wp_gray <= 0; rp_gray_s1 <= 0; rp_gray_s2 <= 0; rp_bin_s <= 0; w_free <= (1 << AW); end
         else begin
             if (w_push) begin wp_bin <= wp_next; wp_gray <= wp_next ^ (wp_next >> 1); end
-            rp_gray_s1 <= rp_gray; rp_gray_s2 <= rp_gray_s1;
-            w_free <= (1 << AW) - ((w_push ? wp_next : wp_bin) - g2b(rp_gray_s2));
+            rp_gray_s1 <= rp_gray; rp_gray_s2 <= rp_gray_s1; rp_bin_s <= g2b(rp_gray_s2);
+            w_free <= (1 << AW) - ((w_push ? wp_next : wp_bin) - rp_bin_s);
         end
     end
 
     // read side
+    // The head register always holds mem[rp] (the RAM address is the pointer after this
+    // cycle's pop). An entry is counted only after its write pointer has crossed the two
+    // synchronisers and the binary stage, i.e. >= 3 r_clk edges after the RAM write, so the
+    // head read sees the written data by the time r_valid shows it.
+    wire        pop     = r_pop && r_valid;
     wire [AW:0] rp_next = rp_bin + 1'b1;
+    wire [AW:0] rp_now  = pop ? rp_next : rp_bin;
     assign r_valid = (r_count != 0);
-    assign r_data  = mem[rp_bin[AW-1:0]];
+    assign r_data  = head;
     always @(posedge r_clk) begin
-        if (r_rst) begin rp_bin <= 0; rp_gray <= 0; wp_gray_s1 <= 0; wp_gray_s2 <= 0; r_count <= 0; end
+        head <= mem[rp_now[AW-1:0]];
+        if (r_rst) begin rp_bin <= 0; rp_gray <= 0; wp_gray_s1 <= 0; wp_gray_s2 <= 0; wp_bin_s <= 0; r_count <= 0; end
         else begin
-            if (r_pop && r_valid) begin rp_bin <= rp_next; rp_gray <= rp_next ^ (rp_next >> 1); end
-            wp_gray_s1 <= wp_gray; wp_gray_s2 <= wp_gray_s1;
-            r_count <= g2b(wp_gray_s2) - ((r_pop && r_valid) ? rp_next : rp_bin);
+            if (pop) begin rp_bin <= rp_next; rp_gray <= rp_next ^ (rp_next >> 1); end
+            wp_gray_s1 <= wp_gray; wp_gray_s2 <= wp_gray_s1; wp_bin_s <= g2b(wp_gray_s2);
+            r_count <= wp_bin_s - rp_now;
         end
     end
 endmodule
