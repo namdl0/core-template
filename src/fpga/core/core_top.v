@@ -631,7 +631,7 @@ always @(posedge clk_sys) aud_tick_s <= {aud_tick_s[1:0], aud_frame_t};
 
     // M5: SDRAM in its own clock domain at 2 x clk_sys (soc/sdram_ctrl2x.v). Set SDRAM_2X to 0
     // for the M3/M4 controller (SDRAM on clk_sys, CL=2); the 115.5 MHz clock then goes unused.
-    localparam  SDRAM_2X     = 1;
+    localparam  SDRAM_2X     = 0;
     localparam  MEM_FREQ_STR = "115.500000 MHz";
 
     wire    clk_sys;
