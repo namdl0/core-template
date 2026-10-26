@@ -205,13 +205,16 @@ module sdram_ctrl2x #(
     reg [15:0] wr_hi; reg [1:0] wr_dqm_hi;
     reg [3:0]  rc_cnt;                                 // clocks since ACTIVE (tRC)
 
-    // read capture: negedge IO register, then posedge (see header)
-    reg [15:0] dq_neg;
-    always @(negedge clk_mem) dq_neg <= sd_dq_in;
+    // read capture: negedge IO register, then a second negedge register in the core (the
+    // IO-cell -> core transfer gets a full period; at 115.5 MHz the direct half-period hop
+    // failed timing by ~1.6 ns), then posedge (core-to-core, placeable adjacently)
+    reg [15:0] dq_neg  /* synthesis preserve */;
+    reg [15:0] dq_neg2 /* synthesis preserve */;
+    always @(negedge clk_mem) begin dq_neg <= sd_dq_in; dq_neg2 <= dq_neg; end
     reg [15:0] dq_pos;
-    always @(posedge clk_mem) dq_pos <= dq_neg;
-    // tag per READ: lo halfword in dq_pos 5 clocks after the READ was registered, hi 6
-    reg [6:0]  rd_pipe;
+    always @(posedge clk_mem) dq_pos <= dq_neg2;
+    // tag per READ: lo halfword in dq_pos 6 clocks after the READ was registered, hi 7
+    reg [7:0]  rd_pipe;
     reg [15:0] rd_lo;
 
     task sdcmd(input [2:0] c);
@@ -234,9 +237,9 @@ module sdram_ctrl2x #(
         end else
             ref_cnt <= ref_cnt - 11'd1;
 
-        rd_pipe <= {rd_pipe[5:0], 1'b0};
-        if (rd_pipe[4]) rd_lo <= dq_pos;
-        if (rd_pipe[5]) begin rq_wd <= {dq_pos, rd_lo}; rq_push <= 1'b1; end
+        rd_pipe <= {rd_pipe[6:0], 1'b0};
+        if (rd_pipe[5]) rd_lo <= dq_pos;
+        if (rd_pipe[6]) begin rq_wd <= {dq_pos, rd_lo}; rq_push <= 1'b1; end
 
         if (mrst) begin
             state       <= S_INIT;
@@ -248,7 +251,7 @@ module sdram_ctrl2x #(
             sd_dqm      <= 2'b11;
             sd_a        <= 13'd0;
             sd_ba       <= 2'd0;
-            rd_pipe     <= 7'd0;
+            rd_pipe     <= 8'd0;
             phase       <= 1'b0;
             rc_cnt      <= 4'd0;
         end else begin
