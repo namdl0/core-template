@@ -23,6 +23,12 @@ all: ../src/fpga/core/fw/boot_b0.hex
 
 # SoC blitter benchmark (simulation only): make bench -> build/bench/boot_b{0..3}.hex,
 # run with: cd <dir containing sim/fw/boot_b*.hex> && Vvl_top $(cat preload.txt)  (tools/blitbench.py)
+benchmix: build/benchmix/boot_b0.hex
+build/benchmix/boot_b0.hex: common/crt0.S common/libc_min.c bench/main.c common/*.h common/link.ld
+	@mkdir -p build/benchmix
+	$(CC) $(CFLAGS) -DSIM -DMIXSTRESS $(LDFLAGS) -o build/benchmix/bench.elf common/crt0.S common/libc_min.c bench/main.c -lgcc
+	$(OBJCOPY) -O binary build/benchmix/bench.elf build/benchmix/bench.bin
+	$(PYTHON) ../tools/bin2hex.py build/benchmix/bench.bin build/benchmix/boot 32768
 bench: build/bench/boot_b0.hex
 build/bench/boot_b0.hex: common/crt0.S common/libc_min.c bench/main.c common/*.h common/link.ld
 	@mkdir -p build/bench
