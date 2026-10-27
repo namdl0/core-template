@@ -5,10 +5,14 @@
 //             (only when the result depends on them); read bursts may be outstanding.
 //   compute : row c -> 1 pixel/clock through palette, tint/fog, alpha, blend into outbuf[c%2]
 //             with a per-pixel write mask (8-stage pipeline, rows stream back to back).
-//   write   : row w -> one masked write burst (split at MAX_BURST) over the written span.
-// Memory port: Avalon-MM-burst style (see periph_mem_port.v / docs/BLITTER.md).
+//   write   : row w -> masked write bursts over the written span.
+// Memory port: the SoC's SDRAM master port directly (docs/MEMORY_MAP.md section 5: one command
+// at a time, <= 64 beats inside one 2 KB SDRAM row, write data pulled with s_wready). Every
+// access is cut at the 64-beat limit and at 2 KB row boundaries only, and a write command is
+// presented as soon as its first beats are in the 3-entry skid buffer (the row is already in
+// outbuf, so the data keeps up with any wready rate), so the bus never waits for a staging copy.
 module blit_engine #(
-    parameter MAX_BURST = 64            // beats (32-bit) per burst, <= 256
+    parameter MAX_BURST = 64            // beats (32-bit) per SDRAM access, <= 64
 ) (
     input  wire        clk,
     input  wire        rst,
@@ -24,17 +28,20 @@ module blit_engine #(
     output reg  [31:0] perf_busy,
     output reg  [31:0] perf_pixels,
     output reg  [31:0] perf_memwait,
-    // memory master
-    output reg         m_valid,
-    input  wire        m_ready,
-    output reg  [31:0] m_addr,
-    output reg         m_write,
-    output reg  [8:0]  m_len,
-    output wire [31:0] m_wdata,
-    output wire [3:0]  m_be,
-    input  wire [31:0] m_rdata,
-    input  wire        m_rvalid
+    // SDRAM master port (docs/MEMORY_MAP.md section 5)
+    output reg         s_cmd_valid,
+    output reg         s_cmd_we,
+    output reg  [25:2] s_cmd_addr,
+    output reg  [5:0]  s_cmd_len,      // beats - 1
+    output wire [31:0] s_wdata,
+    output wire [3:0]  s_wstrb,
+    input  wire        s_cmd_ready,
+    input  wire        s_wready,
+    input  wire [31:0] s_rdata,
+    input  wire        s_rvalid
 );
+    wire [31:0] m_rdata = s_rdata;
+    wire        m_rvalid = s_rvalid;
     localparam OP_BLIT = 4'd0, OP_FILL = 4'd1, OP_CLEAR = 4'd2, OP_MAP = 4'd3,
                OP_SETDST = 4'd4, OP_SETTEX = 4'd5, OP_FENCE = 4'd6;
     localparam K_SRC = 3'd0, K_DST = 3'd1, K_PAL = 3'd2, K_MX = 3'd3, K_MY = 3'd4;
@@ -147,7 +154,10 @@ module blit_engine #(
     localparam R_IDLE = 2'd0, R_REQ = 2'd1, R_WAIT = 2'd2;
     reg [1:0]  rs;
     reg [2:0]  rq_kind; reg rq_slot; reg [31:0] rq_addr; reg [10:0] rq_rem; reg [9:0] rq_idx;
-    wire [8:0] rq_len = (rq_rem > MAX_BURST) ? MAX_BURST[8:0] : rq_rem[8:0];
+    // beats to the end of the 2 KB SDRAM row, the access limit, and what is left
+    wire [9:0] rq_room = 10'd512 - {1'b0, rq_addr[10:2]};
+    wire [8:0] rq_cap  = (rq_room < MAX_BURST) ? rq_room[8:0] : MAX_BURST[8:0];
+    wire [8:0] rq_len  = (rq_rem > {2'b0, rq_cap}) ? rq_cap : rq_rem[8:0];
     reg        rd_req; wire rd_ack;
     assign job_ready = (rs == R_IDLE);
     always @(posedge clk) begin
@@ -170,27 +180,30 @@ module blit_engine #(
     end
 
     // ------------------------------------------------------------------ port arbiter + writer
-    localparam P_IDLE = 2'd0, P_RD = 2'd1, P_WR = 2'd2;
+    // P_WC/P_RC: command presented; P_WB: write beats being pulled (s_wready).
+    localparam P_IDLE = 2'd0, P_RC = 2'd1, P_WC = 2'd2, P_WB = 2'd3;
     reg [1:0] ps;
     reg       wr_req; reg [31:0] wb_addr; reg [8:0] wb_len; reg [8:0] wb_left;
-    // write skid FIFO (4 entries) fed from outbuf
+    // write skid FIFO (4 entries, at most 3 used) fed from outbuf, head = current beat
     reg [32:0] sk [0:3]; reg [1:0] sk_wp, sk_rp; reg [2:0] sk_cnt; reg ob_inflight;
-    wire       sk_pop = (ps == P_WR) && m_valid && m_ready;
-    assign m_wdata = sk[sk_rp][31:0];
-    assign m_be    = {4{sk[sk_rp][32]}};
-    assign rd_ack  = (ps == P_RD) && m_ready;
-    always @(*) begin
-        m_valid = 0; m_write = 0; m_addr = rq_addr; m_len = rq_len;
-        if (ps == P_RD) begin m_valid = 1; end
-        else if (ps == P_WR) begin m_valid = sk_cnt != 0; m_write = 1; m_addr = wb_addr; m_len = wb_len; end
-    end
+    wire       sk_pop = s_wready;
+    assign s_wdata = sk[sk_rp][31:0];
+    assign s_wstrb = {4{sk[sk_rp][32]}};
+    wire       wr_go  = (ps == P_IDLE) && wr_req && sk_cnt != 0;
+    wire       rd_go  = (ps == P_IDLE) && !wr_go && rd_req && rs == R_WAIT;
+    assign rd_ack  = (ps == P_RC) && s_cmd_ready;
     wire wr_burst_done = sk_pop && wb_left == 9'd1;
     always @(posedge clk) begin
-        if (rst) ps <= P_IDLE;
+        if (rst) begin ps <= P_IDLE; s_cmd_valid <= 0; end
         else case (ps)
-            P_IDLE: if (wr_req) ps <= P_WR; else if (rd_req && rs == R_WAIT) ps <= P_RD;
-            P_RD:   if (m_ready) ps <= P_IDLE;
-            P_WR:   if (wr_burst_done) ps <= P_IDLE;
+            P_IDLE: if (wr_go) begin
+                    s_cmd_valid <= 1; s_cmd_we <= 1; s_cmd_addr <= wb_addr[25:2]; s_cmd_len <= wb_len[5:0] - 1'b1; ps <= P_WC;
+                end else if (rd_go) begin
+                    s_cmd_valid <= 1; s_cmd_we <= 0; s_cmd_addr <= rq_addr[25:2]; s_cmd_len <= rq_len[5:0] - 1'b1; ps <= P_RC;
+                end
+            P_RC: if (s_cmd_ready) begin s_cmd_valid <= 0; ps <= P_IDLE; end
+            P_WC: if (s_cmd_ready) begin s_cmd_valid <= 0; ps <= P_WB; end
+            P_WB: if (wr_burst_done) ps <= P_IDLE;
             default: ps <= P_IDLE;
         endcase
     end
@@ -333,7 +346,11 @@ module blit_engine #(
     wire [9:0] w_first = w_row[0] ? first1 : first0;
     wire [9:0] w_last  = w_row[0] ? last1  : last0;
     wire       w_any   = any[w_row[0]];
-    wire       ob_rd_en = (ws == W_BURST) && (w_rdi <= w_end) && (sk_cnt + ob_inflight < 3'd3);
+    // keep the skid topped up to 3 beats, counting the pop of this cycle (sustains 1 beat/clock)
+    wire       ob_rd_en = (ws != W_IDLE) && (w_rdi <= w_end) && ({1'b0, sk_cnt} + ob_inflight < 4'd3 + sk_pop);
+    // next access: up to MAX_BURST beats, never past the 2 KB SDRAM row
+    wire [9:0] w_room = 10'd512 - {1'b0, w_baddr[10:2]};
+    wire [9:0] w_cap  = (w_room < MAX_BURST) ? w_room : MAX_BURST;
     assign ob_ra = {w_slot, w_rdi[8:0]};
     always @(posedge clk) begin
         if (rst || !rows_on) begin
@@ -357,12 +374,12 @@ module blit_engine #(
                 end
                 W_SET: begin
                     wb_addr <= w_baddr;
-                    wb_len  <= (w_rem > MAX_BURST) ? MAX_BURST[8:0] : w_rem[8:0];
-                    wb_left <= (w_rem > MAX_BURST) ? MAX_BURST[8:0] : w_rem[8:0];
+                    wb_len  <= (w_rem > w_cap) ? w_cap[8:0] : w_rem[8:0];
+                    wb_left <= (w_rem > w_cap) ? w_cap[8:0] : w_rem[8:0];
                     wr_req <= 1; ws <= W_BURST;
                 end
                 W_BURST: begin
-                    if (ps == P_WR) wr_req <= 0;
+                    if (wr_go) wr_req <= 0;
                     if (sk_pop) wb_left <= wb_left - 1'b1;
                     if (wr_burst_done) begin
                         w_rem <= w_rem - wb_len; w_baddr <= w_baddr + {wb_len, 2'b00};
@@ -390,7 +407,7 @@ module blit_engine #(
             if (pal_flush) pal_valid <= 0;
             if (ms != M_IDLE) perf_busy <= perf_busy + 1'b1;
             if (p7_v && p7_mask) perf_pixels <= perf_pixels + 1'b1;
-            if (m_valid && !m_ready) perf_memwait <= perf_memwait + 1'b1;
+            if (s_cmd_valid && !s_cmd_ready) perf_memwait <= perf_memwait + 1'b1;
             if (job_valid && job_ready) begin job_valid <= 0; issued_total <= issued_total + job_nw; end
             // palette translucency + map-x span while tables stream in
             if (mxl_v && rtk_d == K_PAL && m_rdata_q[31:24] != 8'd0 && m_rdata_q[31:24] != 8'd255) pal_partial[pal_cur] <= 1;
@@ -517,9 +534,10 @@ module blit_engine #(
         pr_arb_me = 0; pr_arb_oth = 0; pr_arb_idle = 0; pr_acc_r = 0; pr_acc_w = 0; pr_beat_r = 0; pr_beat_w = 0; pr_cmds = 0; pr_rows = 0; pr_arb_ow = 0; pr_arb_pm = 0; pr_arb_none = 0; end
     always @(posedge clk) if (ms != M_IDLE || !cf_empty) begin
         pr_st[ms] <= pr_st[ms] + 1;
-        if (ps == P_RD && !m_ready) pr_rdw <= pr_rdw + 1;
-        if (ps == P_WR && m_valid && !m_ready) pr_wrw <= pr_wrw + 1;
-        if (ps == P_WR && !m_valid) pr_wrs <= pr_wrs + 1;
+        if (ps == P_RC && !s_cmd_ready) pr_rdw <= pr_rdw + 1;
+        if (ps == P_WC && !s_cmd_ready) pr_wrw <= pr_wrw + 1;
+        if (ws == W_BURST && wr_req && sk_cnt == 0) pr_wrs <= pr_wrs + 1;
+        if (s_wready && sk_cnt == 0) $display("BLITPROF ERROR: write beat pulled from an empty skid buffer");
         if (rows_on) begin
             if (c_run) pr_crun <= pr_crun + 1;
             else if (!c_can) begin
@@ -532,7 +550,7 @@ module blit_engine #(
         else if (vl_top.soc.arb.busy) pr_arb_oth <= pr_arb_oth + 1;
         else if (vl_top.soc.arb.p_valid[5]) pr_arb_idle <= pr_arb_idle + 1;
         else if (vl_top.soc.arb.p_valid != 0) pr_arb_ow <= pr_arb_ow + 1;
-        else if (m_valid) pr_arb_pm <= pr_arb_pm + 1;
+        else if (wr_req || rd_req) pr_arb_pm <= pr_arb_pm + 1;
         else pr_arb_none <= pr_arb_none + 1;
         if (vl_top.soc.arb.c_valid && vl_top.soc.arb.c_ready && vl_top.soc.arb.sel == 3'd5) begin
             if (vl_top.soc.arb.c_we) begin pr_acc_w <= pr_acc_w + 1; pr_beat_w <= pr_beat_w + vl_top.soc.arb.c_len + 1; end

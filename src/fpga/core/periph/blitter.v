@@ -2,7 +2,7 @@
 // Register map and command format: docs/BLITTER.md.
 module blitter #(
     parameter FIFO_AW   = 9,     // command FIFO depth 2^FIFO_AW words (512 = 64 commands)
-    parameter MAX_BURST = 64
+    parameter MAX_BURST = 64     // beats per SDRAM access (the SoC port's limit)
 ) (
     input  wire        clk,
     input  wire        rst,
@@ -39,17 +39,10 @@ module blitter #(
         .rd_en(cf_rd), .rd_data(cf_data), .empty(cf_empty), .full(cf_full), .count(cf_count));
 
     wire busy, fence_irq; wire [31:0] fence, perf_busy, perf_pixels, perf_memwait;
-    wire        m_valid, m_ready, m_write, m_rvalid; wire [31:0] m_addr, m_wdata, m_rdata; wire [8:0] m_len; wire [3:0] m_be;
     blit_engine #(.MAX_BURST(MAX_BURST)) eng (
         .clk(clk), .rst(erst), .cf_empty(cf_empty), .cf_rd(cf_rd), .cf_data(cf_data), .pal_flush(pal_flush),
         .busy(busy), .fence(fence), .fence_irq(fence_irq),
         .perf_busy(perf_busy), .perf_pixels(perf_pixels), .perf_memwait(perf_memwait),
-        .m_valid(m_valid), .m_ready(m_ready), .m_addr(m_addr), .m_write(m_write), .m_len(m_len),
-        .m_wdata(m_wdata), .m_be(m_be), .m_rdata(m_rdata), .m_rvalid(m_rvalid));
-    periph_mem_port mport (
-        .clk(clk), .rst(erst),
-        .p_valid(m_valid), .p_ready(m_ready), .p_addr(m_addr), .p_write(m_write), .p_len(m_len),
-        .p_wdata(m_wdata), .p_be(m_be), .p_rdata(m_rdata), .p_rvalid(m_rvalid),
         .s_cmd_valid(mem_cmd_valid), .s_cmd_we(mem_cmd_we), .s_cmd_addr(mem_cmd_addr), .s_cmd_len(mem_cmd_len),
         .s_wdata(mem_wdata), .s_wstrb(mem_wstrb), .s_cmd_ready(mem_cmd_ready), .s_wready(mem_wready),
         .s_rdata(mem_rdata), .s_rvalid(mem_rvalid));
