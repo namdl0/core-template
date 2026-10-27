@@ -57,7 +57,11 @@ module blit_engine #(
     reg [31:0] dst_base, tex_base; reg [15:0] dst_stride, tex_stride;
     reg [31:0] pal_tag [0:3]; reg [3:0] pal_valid, pal_partial;
     reg  [1:0] pal_cur, pal_rr;
-    reg        needs_dst;
+    reg        needs_dst;           // the command may read the destination
+    reg        dst_scan;            // ... only for rows whose source texels include a translucent one
+    // per cached palette: which of the 256 entries are translucent (0 < alpha < 255); part_cur = the
+    // current palette's, used to scan each fetched source row (see the fetch stage)
+    reg [1023:0] part_all; reg [255:0] part_cur;
     reg [11:0] mxmin, mxmax; reg mx_any;
 
     // ------------------------------------------------------------------ main FSM
@@ -144,11 +148,16 @@ module blit_engine #(
         end
     end
     // map-x min/max and palette translucency while loading (one cycle after the beat)
-    reg        mxl_v; reg [2:0] rtk_d;
+    reg        mxl_v; reg [2:0] rtk_d; reg rts_d; reg [7:0] rti_d;
     always @(posedge clk) begin
-        rtk_d <= tq_head[22:20];
+        rtk_d <= tq_head[22:20]; rts_d <= tq_head[19]; rti_d <= rt_sum[7:0];
         mxl_v <= m_rvalid;
     end
+    // source-row scan: does any byte of this beat index a translucent palette entry?
+    wire       scan_hit = part_cur[m_rdata_q[7:0]] | part_cur[m_rdata_q[15:8]] |
+                          part_cur[m_rdata_q[23:16]] | part_cur[m_rdata_q[31:24]];
+    reg  [1:0] s_part;              // per source slot: the row's fetched texels include a translucent one
+    reg  [1:0] s_dst;               // per slot: the destination row was fetched
 
     // ------------------------------------------------------------------ read requester
     localparam R_IDLE = 2'd0, R_REQ = 2'd1, R_WAIT = 2'd2;
@@ -209,8 +218,10 @@ module blit_engine #(
     end
 
     // ------------------------------------------------------------------ fetch stage
-    localparam F_IDLE = 3'd0, F_A = 3'd1, F_B = 3'd2, F_C = 3'd3, F_D = 3'd4, F_E = 3'd5, F_W = 3'd6;
-    reg [2:0]  fs;
+    localparam F_IDLE = 4'd0, F_A = 4'd1, F_B = 4'd2, F_C = 4'd3, F_D = 4'd4, F_E = 4'd5, F_W = 4'd6,
+               F_S = 4'd7, F_S2 = 4'd8;
+    reg [3:0]  fs;
+    reg [31:0] smark;
     reg [15:0] f_srow; reg f_skip; reg [31:0] f_prod; reg [31:0] f_saddr; reg [10:0] f_nw;
     reg [31:0] mark [0:1]; reg [1:0] s_boff [0:1]; reg [1:0] s_skip;
     reg [15:0] f_issued;
@@ -295,7 +306,7 @@ module blit_engine #(
             end
             // P1 -> P2
             p2_v <= p1_v; p2_last <= p1_last; p2_slot <= p1_slot; p2_i <= p1_i;
-            p2_ok <= p1_ok; p2_bs <= p1_bi[1:0]; p2_dst <= needs_dst ? db_rd : 32'd0;
+            p2_ok <= p1_ok; p2_bs <= p1_bi[1:0]; p2_dst <= s_dst[p1_slot] ? db_rd : 32'd0;
             // P2 -> P3
             p3_v <= p2_v; p3_last <= p2_last; p3_slot <= p2_slot; p3_i <= p2_i; p3_ok <= p2_ok; p3_dst <= p2_dst;
             // P3 -> P4
@@ -410,7 +421,12 @@ module blit_engine #(
             if (s_cmd_valid && !s_cmd_ready) perf_memwait <= perf_memwait + 1'b1;
             if (job_valid && job_ready) begin job_valid <= 0; issued_total <= issued_total + job_nw; end
             // palette translucency + map-x span while tables stream in
-            if (mxl_v && rtk_d == K_PAL && m_rdata_q[31:24] != 8'd0 && m_rdata_q[31:24] != 8'd255) pal_partial[pal_cur] <= 1;
+            if (mxl_v && rtk_d == K_PAL) begin
+                part_all[{pal_cur, rti_d}] <= m_rdata_q[31:24] != 8'd0 && m_rdata_q[31:24] != 8'd255;
+                part_cur[rti_d]            <= m_rdata_q[31:24] != 8'd0 && m_rdata_q[31:24] != 8'd255;
+                if (m_rdata_q[31:24] != 8'd0 && m_rdata_q[31:24] != 8'd255) pal_partial[pal_cur] <= 1;
+            end
+            if (mxl_v && rtk_d == K_SRC && scan_hit) s_part[rts_d] <= 1;
             if (mxl_v && rtk_d == K_MX && !tbl_wd[12]) begin
                 mx_any <= 1;
                 if (!mx_any || tbl_wd[11:0] < mxmin) mxmin <= tbl_wd[11:0];
@@ -433,10 +449,10 @@ module blit_engine #(
                         OP_SETDST: begin dst_base <= cw[1]; dst_stride <= cw[2][15:0]; end
                         OP_SETTEX: begin
                             tex_base <= cw[1]; tex_stride <= cw[2][15:0];
-                            if (pal_valid[0] && pal_tag[0] == cw[3] && !cw[0][10]) pal_cur <= 2'd0;
-                            else if (pal_valid[1] && pal_tag[1] == cw[3] && !cw[0][10]) pal_cur <= 2'd1;
-                            else if (pal_valid[2] && pal_tag[2] == cw[3] && !cw[0][10]) pal_cur <= 2'd2;
-                            else if (pal_valid[3] && pal_tag[3] == cw[3] && !cw[0][10]) pal_cur <= 2'd3;
+                            if (pal_valid[0] && pal_tag[0] == cw[3] && !cw[0][10]) begin pal_cur <= 2'd0; part_cur <= part_all[255:0]; end
+                            else if (pal_valid[1] && pal_tag[1] == cw[3] && !cw[0][10]) begin pal_cur <= 2'd1; part_cur <= part_all[511:256]; end
+                            else if (pal_valid[2] && pal_tag[2] == cw[3] && !cw[0][10]) begin pal_cur <= 2'd2; part_cur <= part_all[767:512]; end
+                            else if (pal_valid[3] && pal_tag[3] == cw[3] && !cw[0][10]) begin pal_cur <= 2'd3; part_cur <= part_all[1023:768]; end
                             else begin
                                 pal_cur <= pal_rr; pal_rr <= pal_rr + 1'b1; pal_tag[pal_rr] <= cw[3];
                                 pal_valid[pal_rr] <= 1; pal_partial[pal_rr] <= 0;
@@ -467,6 +483,9 @@ module blit_engine #(
                     needs_dst <= (op == OP_CLEAR) ? 1'b0 :
                                  (op == OP_FILL) ? (blend == 2'd1 || blend == 2'd3 || alt1) :
                                  (blend == 2'd1 || blend == 2'd3 || alt1 || pal_partial[pal_cur]);
+                    // normal blend, alpha 1: a texel's result depends on the destination only if its
+                    // palette alpha is translucent, so such rows are checked after the source arrives
+                    dst_scan  <= (op == OP_BLIT || op == OP_MAP) && !(blend == 2'd1 || blend == 2'd3 || alt1);
                     ms <= M_INIT2;
                 end
                 M_INIT2: begin
@@ -500,12 +519,28 @@ module blit_engine #(
                         if (!f_skip && has_src && !job_valid) begin
                             job_valid <= 1; job_kind <= K_SRC; job_slot <= f_row[0]; job_addr <= f_saddr;
                             job_nw <= ({9'd0, f_saddr[1:0]} + span_bytes + 11'd3) >> 2;
+                            s_part[f_row[0]] <= 1'b0;
                         end
                         fs <= F_E;
                     end
                     F_E: if (!job_valid) begin
+                        smark <= issued_total;
+                        s_dst[f_row[0]] <= 1'b0;
                         if (!f_skip && needs_dst) begin
+                            if (dst_scan) fs <= F_S;
+                            else begin
+                                job_valid <= 1; job_kind <= K_DST; job_slot <= f_row[0]; job_addr <= fdst_addr; job_nw <= W[10:0];
+                                s_dst[f_row[0]] <= 1'b1;
+                                fs <= F_W;
+                            end
+                        end else fs <= F_W;
+                    end
+                    // wait for the whole source row (returned_total), one more cycle for its scan flag
+                    F_S: if ($signed(returned_total - smark) >= 0) fs <= F_S2;
+                    F_S2: begin
+                        if (s_part[f_row[0]]) begin
                             job_valid <= 1; job_kind <= K_DST; job_slot <= f_row[0]; job_addr <= fdst_addr; job_nw <= W[10:0];
+                            s_dst[f_row[0]] <= 1'b1;
                         end
                         fs <= F_W;
                     end
