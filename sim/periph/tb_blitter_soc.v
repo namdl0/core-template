@@ -1,21 +1,20 @@
-// Integration testbench: ufo50_blitter (the SoC-facing wrapper, periph_mem_port adapter
-// included) against the SoC's own mem_cmd_* protocol model (sdram_arb_model.v), reusing
-// blitgen's vectors. Same pass criterion as tb_blitter.v: HDL output == C model.
+// Integration testbench: ufo50_blitter (the SoC-facing wrapper) against the SoC's own mem_cmd_*
+// protocol model (sdram_arb_model.v, random stalls/latency/beat gaps), reusing blitgen's vectors.
+// Pass criterion: HDL output == C model (sim/periph/run_blit_vl.sh, Verilator --timing).
 `timescale 1ns/1ps
 module tb_blitter_soc;
-    parameter LAT = 8, STALL_PCT = 0;
+    parameter LAT = 8, STALL_PCT = 0, GAP_PCT = 0;
     reg clk = 0, rst = 1;
     always #8.68 clk = ~clk;   // 57.75 MHz
     reg  [15:2] adr; reg [31:0] dat_i; wire [31:0] dat_o; reg we = 0, cyc = 0, stb = 0; wire ack, irq, present;
-    wire cv, cwe, cr, wr; wire [25:2] caddr; wire [2:0] clen; wire [31:0] wd, rd;
-    wire [3:0] wstrb;
+    wire cv, cwe, cr, wr; wire [25:2] caddr; wire [5:0] clen; wire [31:0] wd, rd;
+    wire [3:0] wstrb; wire rv;
     ufo50_blitter dut (.clk(clk), .rst(rst), .wb_adr(adr), .wb_dat_w(dat_i), .wb_dat_r(dat_o),
         .wb_sel(4'hF), .wb_we(we), .wb_cyc(cyc), .wb_stb(stb), .wb_ack(ack), .irq(irq),
         .mem_cmd_valid(cv), .mem_cmd_we(cwe), .mem_cmd_addr(caddr), .mem_cmd_len(clen),
         .mem_wdata(wd), .mem_wstrb(wstrb), .mem_cmd_ready(cr), .mem_wready(wr), .mem_rdata(rd), .mem_rvalid(rv),
         .present(present));
-    wire rv;
-    sdram_arb_model #(.MEMW(1 << 21), .LAT(LAT), .STALL_PCT(STALL_PCT)) ram (
+    sdram_arb_model #(.MEMW(1 << 21), .LAT(LAT), .STALL_PCT(STALL_PCT), .GAP_PCT(GAP_PCT)) ram (
         .clk(clk), .mem_cmd_valid(cv), .mem_cmd_we(cwe), .mem_cmd_addr(caddr), .mem_cmd_len(clen),
         .mem_wdata(wd), .mem_wstrb(wstrb), .mem_cmd_ready(cr), .mem_wready(wr), .mem_rdata(rd), .mem_rvalid(rv));
 
@@ -50,6 +49,7 @@ module tb_blitter_soc;
         guard = 0; rdv = 1;
         while (rdv[0] && guard < 200000000) begin wbr(16'h0004); guard = guard + 1; end
         $display("blitter_soc: fence via mem_cmd_* protocol OK after %0d poll cycles", guard);
+        wbr(16'h0014); $display("blitter_soc: busy cycles %0d", rdv);
         fd = $fopen(fout, "w");
         for (i = 0; i < dwords; i = i + 1) $fwrite(fd, "%08x\n", ram.mem[dbase + i]);
         $fclose(fd);

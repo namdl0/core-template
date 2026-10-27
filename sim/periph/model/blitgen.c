@@ -46,7 +46,7 @@ static int gen_random(int n, const char *dir) {
     const int SW = 400, SH = 240, SSTR = 512 * 4;          /* surface with stride != width */
     uint32_t surf = alloc(SSTR * SH);
     for (uint32_t i = 0; i < (uint32_t)SSTR * SH / 4; i++) wr32(surf + 4 * i, rnd());
-    enum { NP = 3, NPAL = 6 };
+    enum { NP = 3, NPAL = 7 };
     int pw[NP] = {256, 300, 64}, ph[NP] = {128, 64, 64}, pst[NP] = {256, 304, 64};
     uint32_t page[NP], pal[NPAL]; BmPage pg[NPAL];
     for (int p = 0; p < NP; p++) { page[p] = alloc(pst[p] * ph[p]); for (int i = 0; i < pst[p] * ph[p]; i++) mem[page[p] + i] = (uint8_t)rnd(); }
@@ -56,6 +56,7 @@ static int gen_random(int n, const char *dir) {
             uint32_t c = rnd(), a; int r = rr(10);
             a = r < 2 ? 0 : r < 7 ? 255 : (q % 2 ? (uint32_t)(1 + rr(254)) : (uint32_t)(64 * (1 + rr(3))));
             if (q == 5) a = r < 3 ? 0 : 255;           /* an opaque palette (no dst reads) */
+            if (q == 6) a = i == 7 || i == 200 ? (uint32_t)(1 + rr(254)) : r < 3 ? 0 : 255;   /* 2 translucent entries: rows mixed */
             wr32(pal[q] + 4 * i, (c & 0xFFFFFF) | (a << 24));
         }
         pg[q].pal = (uint32_t *)(mem + pal[q]); bm_page_levels(&pg[q]);

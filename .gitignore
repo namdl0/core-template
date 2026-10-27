@@ -9,3 +9,4 @@ __pycache__/
 sim/out/
 sim/fw/
 firmware/build/
+sim/periph/work*/
