@@ -46,13 +46,9 @@ int main(void)
     const uint32_t *c = (const uint32_t *)(uintptr_t)(SDRAM_BASE + CMDS);
 
     /* scan the destination out as ABGR8888 while blitting */
-#ifndef NOSCAN
     FB_ADDR = SDRAM_BASE + ((dbase * 4) & ~0xFFu);
     VID_CTRL = VID_CTRL_SCANOUT | (1u << 2);
     while (VID_STATUS & VID_STATUS_SWAP_PEND) { }
-#else
-    VID_CTRL = 0;                   /* -DNOSCAN (make benchns): no framebuffer scanout, blitter alone */
-#endif
 
 #ifdef MIXSTRESS
     /* sample data: 8192 PCM16 frames (a ramp) and 16 KB of bytes played as ADPCM; seek table 0 */

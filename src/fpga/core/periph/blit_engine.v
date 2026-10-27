@@ -59,15 +59,20 @@ module blit_engine #(
     reg  [1:0] pal_cur, pal_rr;
     reg        needs_dst;           // the command may read the destination
     reg        dst_scan;            // ... only for rows whose source texels include a translucent one
-    // per cached palette: which of the 256 entries are translucent (0 < alpha < 255); part_cur = the
-    // current palette's, used to scan each fetched source row (see the fetch stage)
-    reg [1023:0] part_all; reg [255:0] part_cur;
+    // per cached palette: which of the 256 entries are translucent (0 < alpha < 255), kept in partram
+    // (4 palettes x 8 words x 32 bits); part_cur = the current palette's, used to scan each fetched
+    // source row (see the fetch stage). Filled while a palette loads, copied back on a cache hit.
+    reg [255:0] part_cur; reg [31:0] pacc; reg [3:0] pc_i;
+    reg         pt_we; reg [4:0] pt_wa; reg [31:0] pt_wd; wire [4:0] pt_ra; wire [31:0] pt_rd;
+    periph_ram #(.AW(5), .DW(32)) partram (.clk(clk), .we(pt_we), .wa(pt_wa), .wd(pt_wd), .ra(pt_ra), .rd(pt_rd));
     reg [11:0] mxmin, mxmax; reg mx_any;
 
     // ------------------------------------------------------------------ main FSM
     localparam M_IDLE = 4'd0, M_LOAD = 4'd1, M_DEC = 4'd2, M_PAL = 4'd3, M_WAIT = 4'd4, M_MX = 4'd5,
-               M_MXW = 4'd6, M_MY = 4'd7, M_MYW = 4'd8, M_INIT = 4'd9, M_INIT2 = 4'd10, M_ROWS = 4'd11;
+               M_MXW = 4'd6, M_MY = 4'd7, M_MYW = 4'd8, M_INIT = 4'd9, M_INIT2 = 4'd10, M_ROWS = 4'd11,
+               M_PCPY = 4'd12;
     reg [3:0] ms;
+    assign pt_ra = {pal_cur, pc_i[2:0]};
     reg [3:0] ld_req, ld_got;   // words popped / captured
     reg       cf_rd_d;
     assign cf_rd = (ms == M_LOAD) && !cf_empty && ld_req != 4'd8;
@@ -461,6 +466,7 @@ module blit_engine #(
             perf_busy <= 0; perf_pixels <= 0; perf_memwait <= 0;
             dst_base <= 0; dst_stride <= 0; tex_base <= 0; tex_stride <= 0;
         end else begin
+            pt_we <= 0;
             if (pal_flush) pal_valid <= 0;
             if (ms != M_IDLE) perf_busy <= perf_busy + 1'b1;
             if (p7_v && p7_mask) perf_pixels <= perf_pixels + 1'b1;
@@ -468,8 +474,12 @@ module blit_engine #(
             if (job_valid && job_ready) begin job_valid <= 0; issued_total <= issued_total + job_nw; end
             // palette translucency + map-x span while tables stream in
             if (mxl_v && rtk_d == K_PAL) begin
-                part_all[{pal_cur, rti_d}] <= m_rdata_q[31:24] != 8'd0 && m_rdata_q[31:24] != 8'd255;
-                part_cur[rti_d]            <= m_rdata_q[31:24] != 8'd0 && m_rdata_q[31:24] != 8'd255;
+                pacc <= {m_rdata_q[31:24] != 8'd0 && m_rdata_q[31:24] != 8'd255, pacc[31:1]};
+                if (rti_d[4:0] == 5'd31) begin
+                    pt_we <= 1; pt_wa <= {pal_cur, rti_d[7:5]};
+                    pt_wd <= {m_rdata_q[31:24] != 8'd0 && m_rdata_q[31:24] != 8'd255, pacc[31:1]};
+                    part_cur[{rti_d[7:5], 5'd0} +: 32] <= {m_rdata_q[31:24] != 8'd0 && m_rdata_q[31:24] != 8'd255, pacc[31:1]};
+                end
                 if (m_rdata_q[31:24] != 8'd0 && m_rdata_q[31:24] != 8'd255) pal_partial[pal_cur] <= 1;
             end
             if (mxl_v && rtk_d == K_SRC && scan_hit) s_part[rts_d] <= 1;
@@ -509,10 +519,10 @@ module blit_engine #(
                         OP_SETDST: begin dst_base <= cw[1]; dst_stride <= cw[2][15:0]; end
                         OP_SETTEX: begin
                             tex_base <= cw[1]; tex_stride <= cw[2][15:0];
-                            if (pal_valid[0] && pal_tag[0] == cw[3] && !cw[0][10]) begin pal_cur <= 2'd0; part_cur <= part_all[255:0]; end
-                            else if (pal_valid[1] && pal_tag[1] == cw[3] && !cw[0][10]) begin pal_cur <= 2'd1; part_cur <= part_all[511:256]; end
-                            else if (pal_valid[2] && pal_tag[2] == cw[3] && !cw[0][10]) begin pal_cur <= 2'd2; part_cur <= part_all[767:512]; end
-                            else if (pal_valid[3] && pal_tag[3] == cw[3] && !cw[0][10]) begin pal_cur <= 2'd3; part_cur <= part_all[1023:768]; end
+                            if (pal_valid[0] && pal_tag[0] == cw[3] && !cw[0][10]) begin pal_cur <= 2'd0; pc_i <= 0; ms <= M_PCPY; end
+                            else if (pal_valid[1] && pal_tag[1] == cw[3] && !cw[0][10]) begin pal_cur <= 2'd1; pc_i <= 0; ms <= M_PCPY; end
+                            else if (pal_valid[2] && pal_tag[2] == cw[3] && !cw[0][10]) begin pal_cur <= 2'd2; pc_i <= 0; ms <= M_PCPY; end
+                            else if (pal_valid[3] && pal_tag[3] == cw[3] && !cw[0][10]) begin pal_cur <= 2'd3; pc_i <= 0; ms <= M_PCPY; end
                             else begin
                                 pal_cur <= pal_rr; pal_rr <= pal_rr + 1'b1; pal_tag[pal_rr] <= cw[3];
                                 pal_valid[pal_rr] <= 1; pal_partial[pal_rr] <= 0;
@@ -531,6 +541,11 @@ module blit_engine #(
                             end
                         default: ;
                     endcase
+                end
+                M_PCPY: begin   // partram word pc_i-1 is on pt_rd
+                    if (pc_i != 0) part_cur[{pc_i[2:0] - 3'd1, 5'd0} +: 32] <= pt_rd;
+                    pc_i <= pc_i + 1'b1;
+                    if (pc_i == 4'd8) ms <= M_IDLE;
                 end
                 M_WAIT: if (!job_valid && rs == R_IDLE && returned_total == issued_total) ms <= M_IDLE;
                 M_MXW: if (!job_valid && rs == R_IDLE && returned_total == issued_total && !mxl_v) begin
