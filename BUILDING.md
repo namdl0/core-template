@@ -24,7 +24,7 @@ Build, package and copy exactly as for M5 (`git checkout ufo50-blit2`). Check in
 - **Resources**: expect roughly +400-600 ALMs and +1-2 M10K blocks over the M5 build.
 
 On the Pocket:
-- **M4 test screen** (no `ufo50rt.bin`, or hold L3 off): the line `BLIT 11 cmds vs C model PASS` must still say
+- **M4 test screen** (shown when there is no `ufo50rt.bin` on the card): the line `BLIT 11 cmds vs C model PASS` must still say
   PASS; its cycle count drops (simulation: 50,277 -> 43,849). In the blitter demo (SELECT) the `blit <N>k cyc`
   number should be lower than with the M5 build.
 - **Games**: Valbrace, Hyper Contender, Overbold, Avianos, Quibble Race, Party House, Night Manor, Rakshasa,
