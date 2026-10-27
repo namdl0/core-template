@@ -5,12 +5,14 @@ from 8 bpp indexed texture pages with a per-page 256-entry palette. Implements `
 `RC_CLEAR` and `RC_BLIT_MAP` (scaled blits as a destination rect plus per-column/row texel-index tables).
 Rotation stays in software, as in the PC runtime.
 
-Files: `src/fpga/core/periph/blit_engine.v` (row-pipelined executor), `blitter.v` (Wishbone slave +
-command FIFO), `periph_ram.v` (RAM/FIFO primitives), `periph_mem_port.v` (adapter to the SoC's SDRAM
-master port, `docs/MEMORY_MAP.md` §5), `sim/periph/model/blit_model.[ch]` (bit-exact C model),
-`sim/periph/{tb_blitter,tb_blitter_soc}.v` (testbenches), `sim/periph/model/blitgen.c` (test-vector /
-dump-replay generator), `src/fpga/core/soc/ufo50_blitter.v` (the SoC-facing wrapper named per the memory
-map contract).
+Files: `src/fpga/core/periph/blit_engine.v` (row-pipelined executor, drives the SoC's SDRAM master
+port directly since branch `ufo50-blit2`), `blitter.v` (Wishbone slave + command FIFO), `periph_ram.v`
+(RAM/FIFO primitives), `sim/periph/model/blit_model.[ch]` (bit-exact C model),
+`sim/periph/tb_blitter_soc.v` + `sdram_arb_model.v` (random-stream testbench, `run_blit_vl.sh`),
+`sim/periph/model/blitgen.c` (test-vector / dump-replay generator), `src/fpga/core/soc/ufo50_blitter.v`
+(the SoC-facing wrapper named per the memory map contract). `periph_mem_port.v` is now used by the mixer
+only. `tb_blitter.v`/`run_blit.sh` (Icarus, the old internal port) are kept for history and no longer
+match `blitter.v`'s ports.
 
 ## Interface
 
@@ -28,7 +30,7 @@ map contract).
 | `0x0C` | `FENCE` | R | value of the last executed `FENCE` command |
 | `0x10` | `IRQ_ACK` | W | write 1 to clear the pending IRQ |
 | `0x14` | `PERF_BUSY` | R | cycles busy since reset/soft-reset |
-| `0x18` | `PERF_PIXELS` | R | pixels actually written (mask set) since reset |
+| `0x18` | `PERF_PIXELS` | R | pixels actually written (mask set) since reset; a `CLEAR` dropped by CLEAR coalescing (see Pipeline) is not counted |
 | `0x1C` | `PERF_MEMWAIT` | R | cycles stalled waiting for the SDRAM master port |
 
 Writes to `0x8000-0xFFFF` (or word `0x0040`, same alias) push one 32-bit word into the command FIFO.
@@ -116,18 +118,45 @@ calling the model/hardware path, so the display list's contract to the rest of t
 ## Pipeline (`blit_engine.v`)
 
 Three overlapped per-row stages, so SDRAM latency for row *N+1* hides behind compute/write of row *N*:
-- **fetch**: issues the source-texel burst (and, when blending/alpha/palette-translucency requires it,
-  the destination-pixel burst) for one row into a double-buffered line cache (`srcbuf`/`dstbuf`, 2 x 512
-  words each).
+- **fetch**: issues the source-texel burst (and, when the result can depend on it, the destination-pixel
+  burst) for one row into a double-buffered line cache (`srcbuf`/`dstbuf`, 2 x 512 words each).
 - **compute**: an 8-stage pipeline, 1 pixel/clock: byte index -> palette lookup -> tint/fog -> source alpha
   (opaque fast path or the `a16` multiply) -> blend (normal/add/subtract) with a per-pixel write mask,
   into `outbuf` (2 x 512 slots).
-- **write**: one masked write burst per row (coalesced to the pixels actually touched by `BLIT_MAP`'s skip
-  entries), split at the memory port's burst limit.
+- **write**: masked write bursts over the row's written pixels, one per *segment* (below).
 Four palettes are cached in BRAM, round-robin on `SET_TEX`, hit-checked by base address so back-to-back
-draws from the same page cost nothing extra. The destination burst is skipped entirely (and its RAM input
-force-zeroed, see "Verification") whenever the command is opaque/normal-blend with alpha==1 and an opaque
-palette — most of Barbuta's tile and sprite blits.
+draws from the same page cost nothing extra.
+
+The 16-bit SDRAM moves one 32-bit word every 2 clocks, so the engine (1 pixel/clock) is bound by memory
+traffic, not by compute: a written pixel costs 2 clocks of bus time, a destination read 2 more, a source
+texel 0.5, plus ~7-9 clocks per access (ACTIVE/precharge, controller turnaround). Branch `ufo50-blit2`
+(measured with `BLIT_PROF`, see Verification) cuts that traffic and the idle time between accesses:
+
+1. **Direct SDRAM port.** The engine is the arbiter port X0 master itself (`s_cmd_*`): a write access
+   is presented as soon as the first beats of the row are in a 3-entry skid buffer fed from `outbuf` at
+   1 word/clock (the old `periph_mem_port` copied every 32-word block into a staging buffer first, leaving
+   the bus idle meanwhile), and every access is cut only at 64 beats and at 2 KB SDRAM-row boundaries
+   (was: 128-byte blocks).
+2. **Destination reads only where needed.** A normal-blend, alpha-1 `BLIT`/`BLIT_MAP` used to read the
+   whole destination rectangle whenever the page's palette had *any* translucent entry. Its result can
+   only depend on the destination for texels whose palette alpha is translucent (0 < a < 255: a=255
+   replaces, a=0 is not written), so each fetched source row is scanned as it arrives against the current
+   palette's 256-bit translucency map (`partram`, 4 x 256 bits, filled while a palette loads, copied to
+   `part_cur` in 8 cycles on a palette-cache hit) and the destination row is fetched only if one of its
+   bytes hits (the scan covers the whole fetched span, a superset of the texels used, so it can only err
+   towards an unneeded read). Add/subtract/alpha<1 commands keep the full read. In every captured game
+   frame no draw needed a destination read at all; before, 20-40% of the bus time was these reads.
+3. **Write segments.** While a row is computed its written pixels are recorded as segments
+   (`segram`, 2 x 256 x {start,end}); a run of 5 or more unwritten pixels (transparent texels,
+   `BLIT_MAP` skips) ends one write access and starts another, instead of being sent with all byte
+   enables off at 2 clocks per pixel.
+4. **CLEAR coalescing.** A `CLEAR` is held back until the next command is decoded. If that is a `CLEAR`
+   of the same rectangle (words 1-2 equal) with no command in between - so on the same surface - the held
+   one is dropped: all its pixels would be overwritten. Any other command (including `SET_DST` and
+   `FENCE`), or 256 idle cycles with an empty command FIFO, executes the held `CLEAR` first and then the
+   command; `STATUS.busy` stays 1 while one is held. Valbrace and Hyper Contender clear the full screen
+   twice per frame (one full-screen `CLEAR` is ~170k cycles). The output is identical; only `PERF_PIXELS`
+   and the timing change.
 
 ## Verification
 
@@ -150,36 +179,83 @@ palette — most of Barbuta's tile and sprite blits.
    beats, write data pulled via `wready`). Same random and real-frame vectors; all PASS.
 4. `make blitmodel` in the runtime adds no change to the normal (`make ufo50rt`) build — the hook is
    `#ifdef BLIT_MODEL` only in `render.c`'s `rc_submit`/`put_px`/`render_frame`.
+5. **Branch `ufo50-blit2`** (the engine as described above), all with Verilator 5.034:
+   - `sh sim/periph/run_blit_vl.sh`: `tb_blitter_soc.v` against `sdram_arb_model.v` (now: 64-beat
+     commands, a 2 KB-row check, random command stalls, latency and beat gaps including back-to-back
+     `wready`), four random streams (300-900 draws; flips, tint, fog, alpha < 1, add/subtract,
+     `BLIT_MAP` with skips, `FILL`, `CLEAR` incl. same-rectangle chains, a palette with only two
+     translucent entries so rows with and without a destination read mix): **4/4 PASS** (HDL == C model).
+     A deliberately broken CLEAR-coalescing compare is caught (FAIL).
+   - SoC benches (`firmware/bench`, `SDRAM_1X=1`): the eight frames of the Throughput table, bit-exact,
+     SDRAM model 0 timing errors; also on the 115.5 MHz `sdram_ctrl2x` build.
+   - `SDRAM_1X=1 sh sim/verilator/run.sh +max_ms=1000`: TB_SOC PASS, `BLIT 11 cmds vs C model PASS`
+     (43,849 cycles, was 50,277), 37 frames compared with 0 mismatches, save write-back test PASS, SDRAM
+     model 0 errors; `+boot6=` PASS; `make benchmix` 0 mixer underruns under blitter load.
 
-## Throughput estimate (57.75 MHz `clk_sys`, `docs/MEMORY_MAP.md`)
+## Throughput (branch `ufo50-blit2`, real frames on the full SoC, `SDRAM_2X = 0`)
 
-From the captured real frames (`run_blit.sh`'s `DUMPS` step, `perf_busy`/`perf_pixels`):
-- **Barbuta**: 265 draw commands/frame, 73,248 texels touched, 82,944 pixels actually written (opaque
-  tile layer dominates; most commands skip the destination read). HDL: 275,690 busy cycles with the fast
-  memory timing (**4.8 ms** at 57.75 MHz), 620,401 cycles (**10.7 ms**) at the 16-bit/2-cycle timing.
-- **Library** (5 of its ~20 scaled-blit frames): 126 commands, 111,748 pixels written including the
-  `BLIT_MAP` strips. 364,513 busy cycles fast (**6.3 ms**), 931,474 (**16.1 ms**) at 16-bit timing.
-- Both are well under the 16.67 ms frame budget even at the pessimistic memory timing, with ~50% of a
-  frame left for the CPU and audio, matching `docs/CORE_PREP.md`'s "takes ~70% of the frame cost" offload
-  target being more than met. The 16-bit timing figure is conservative: the real SDRAM is interleaved by
-  the arbiter across video/CPU/audio and bursts up to 32 B (8 beats), close to the fast-timing numbers
-  above (~8 cycles + 2/beat per `docs/MEMORY_MAP.md` §5, vs. this estimate's 20-cycle latency + 16-beat
-  worst case).
-- The library's full ~276k-texel/frame worst case (`docs/RV32_MEASURE.md`) is ~2.5x the measured 5-frame
-  average above; scaling linearly stays under budget (~16 ms fast-memory, ~40 ms 16-bit — the latter would
-  need the SoC team's real arbiter numbers to confirm, flagged as an open question below).
+`firmware/bench` replays a captured command stream on the Verilator SoC (`SDRAM_1X=1`, the controller the
+Pocket build uses) while the video scans the destination out as ABGR8888, and compares the destination
+with the C model word for word. Frames: `barb`/`lib` are the earlier PC-runtime dumps (2 frames each);
+the six games are one frame each of the Pocket image itself (`ufo50-ap` main, `rv32sim --soc` with the
+`tools/rv32sim-bdump.patch` capture, the 50-game survey's input scripts, median-blitter frames of the
+gameplay window). Busy = `PERF_BUSY` cycles; free = busy minus the cycles another master (the video)
+owned the SDRAM, i.e. the blitter's time without contention (the bench's short runs see a variable share
+of scanout, so free is the fairer before/after number). Every run bit-exact, 0 SDRAM timing errors.
 
-## Resource estimate (Yosys 0.44 + Mistral, Cyclone V primitives; Quartus not available here — see
-`docs/CORE_PREP.md` for the toolchain note)
+| frame | draws | busy before | busy after | free before | free after | free change |
+|---|---|---|---|---|---|---|
+| Barbuta (2 frames) | 530 | 1,418,879 | 1,241,452 | 1,227,817 | 1,056,049 | -14% |
+| library (2 frames) | 170 | 1,536,539 | 1,293,505 | 1,314,045 | 1,116,057 | -15% |
+| Valbrace f5416 | 25 | 940,453 | 306,194 | 772,165 | 305,138 | -60% |
+| Hyper Contender f4214 | 219 | 1,692,461 | 826,744 | 1,415,991 | 691,778 | -51% |
+| Overbold f4019 | 488 | 1,204,686 | 687,268 | 1,019,032 | 592,466 | -42% |
+| Avianos f4389 | 143 | 1,766,933 | 937,216 | 1,466,001 | 765,728 | -48% |
+| Vainger f4002 | 201 | 1,819,735 | 1,186,337 | 1,500,257 | 1,006,755 | -33% |
+| Quibble Race f4077 | 377 | 1,000,739 | 561,414 | 816,691 | 510,026 | -38% |
 
-`blitter` (engine + Wishbone + FIFOs + RAMs), post-`synth_intel_alm`, pre-placement:
-- ALUTs: 2,974 (228x2-input, 485x3, 359x4, 534x5, 209x6, 1,159 arithmetic-mode), FFs: 2,238
-- M10K blocks: 22 (220 Kb of 3,383 Kb available, 6.5%); MLAB: 130 (small FIFOs/skid buffers)
-- Multipliers: 2x 18x18 + 16x 9x9 (≈6 of 66 DSP blocks)
-These are LUT/FF primitive counts from an open-source synthesis flow, not Quartus's ALM-packed LE count;
-expect Quartus to report somewhat fewer ALMs than this ALUT count (Cyclone V ALMs pack two LUTs under
-shared inputs) but the figure is a reasonable upper bound. Logic is ~6% of the 5CEBA4 budget of 18,480
-ALMs even without packing credit.
+In a game the scanout takes ~18% of the SDRAM time over a frame (216 lines x 6 x 135 cycles of 962,500),
+so a frame's blitter time is about free / 0.82: Valbrace 0.94M -> 0.37M cycles, Hyper Contender 1.73M ->
+0.85M, Overbold 1.25M -> 0.72M, Avianos 1.79M -> 0.94M, Vainger 1.83M -> 1.23M, Quibble Race 1.00M ->
+0.62M (budget 0.96M per 60 Hz frame). Barbuta and the library gain least: they never read the
+destination and draw 16-px tiles, so they were already close to the write-traffic floor.
+
+Where the remaining time goes (`BLIT_PROF`, Hyper Contender after): 82% SDRAM data beats, 9% waiting
+for the controller between accesses (its fixed ACTIVE/precharge turnaround, `sdram_ctrl.v` S_WAIT, and
+refresh), 4% bus idle between commands, the rest ACTIVE/tRCD inside accesses. The next levers, not done
+here: overlapping a write's precharge with the next access's ACTIVE in another bank in `sdram_ctrl.v`
+(~4-6%, touches the controller every master uses), and starting the next command's first fetch while
+the previous one's last rows are written (~3-5%).
+
+### Profiling and capture
+
+- `BLIT_PROF=1 SDRAM_1X=1 sh sim/verilator/run.sh ...` builds the SoC with `blit_engine.v`'s
+  simulation-only counters (`ifdef BLIT_PROF`, not synthesised): cycles per engine state, port waits,
+  compute stalls, SDRAM ownership and the reason for every idle bus cycle while the blitter is busy,
+  printed at the bench's final `FENCE 0xD0D0`.
+- Capturing a Pocket frame: apply `tools/rv32sim-bdump.patch` to `ufo50-ap` (`git apply`, then
+  `make -C tools/rv32sim`), run the survey command line (`tools/pocket_survey.py`'s `sim_cmd`, with the
+  game's `input.txt`) plus `--bdump N:DIR --stop-after N+2`. DIR gets the regions the frame's commands
+  touch at their real SDRAM offsets (snapshot before the frame's first command executes), `hdr.le`,
+  `expect.le` (C model on the snapshot; the tool also reports that it equals the simulator's own result)
+  and `preload.txt`. Run: `make -C firmware bench`, copy `firmware/build/bench/boot_b*.hex` to
+  `<dir>/sim/fw/`, then from `<dir>`: `<repo>/sim/out/vl_obj_1x/Vvl_top +max_ms=400 $(cat DIR/preload.txt)`
+  (`BENCH 12/13` = busy hi/lo, `BENCH 01` = mismatching words, must be 0).
+
+## Resource estimate
+
+Earlier figure (Yosys 0.44 + Mistral, `ufo50-periph`): `blitter` ~2,974 ALUTs, 2,238 FFs, 22 M10K,
+130 MLAB, ~6 DSP. `ufo50-blit2` changes (no Yosys/Quartus here, estimated by hand):
+- removed from the blitter: `periph_mem_port` (64 x 36-bit staging RAM, read/write chunkers), roughly
+  150-250 ALMs and 2-4 MLABs;
+- added: `segram` 512 x 18 (1 M10K), `partram` 32 x 32 (1 MLAB or M10K), `part_cur` 256 FFs with 8 word
+  enables, the source-row scan (four 256:1 bit muxes, ~340 ALUTs), segment tracking (~60 ALMs), CLEAR
+  coalescing (3 x 32-bit registers, two 32-bit compares, ~60 ALMs), 2 KB-row access cutting (~30 ALMs).
+- net: about +400-600 ALMs (~2-3% of the 5CEBA4's 18,480) and +1-2 M10K. Timing: the new paths are short
+  (the scan is register -> 3-level mux -> OR -> register; the access-length cut is a 10-bit subtract and
+  two compares before a register); the longest new combinational path is the arbiter's `wready` into the
+  skid-buffer refill condition and `outbuf`'s read address (controller state -> arbiter AND/owner compare ->
+  3-bit add/compare -> RAM address), about 5-6 LUT levels.
 
 ## C model and test-vector generator
 
@@ -197,10 +273,8 @@ pointers), used to produce `expect.hex`.
 - The library's worst-case ~276k-texel frame (not captured in the dumped sample) should be measured
   directly once `ufo50-m3`'s firmware can drive the blitter from a real room, to confirm the ~40 ms
   16-bit-timing extrapolation above isn't actually hit under the real arbiter's video/CPU contention.
-- `periph_mem_port` currently assumes the write-staging buffers (2 x 8 words) can always drain before the
-  next 32-byte block is ready; under heavy arbiter contention (video scanout + CPU) this could in
-  principle stall the collecting side. Not observed in simulation (fixed-latency and 30%-stall models),
-  but the real arbiter's worst-case latency bound (`docs/MEMORY_MAP.md` says "below 256 cycles") is wider
-  than tested here.
+- The blitter now issues up to 64-beat accesses (as the video already did), so another master can wait
+  up to ~135 cycles behind one (was ~71 with 32-beat blocks). The mixer stress bench (`make benchmix`,
+  32 voices while Hyper Contender's frame is replayed 3 times) shows 0 underruns, as before.
 - `FENCE`'s IRQ is wired but the firmware side (clearing `IRQ_PENDING` bit 2) is the SoC/firmware team's
   to exercise; only polling (`STATUS` bit 1 / `IRQ_ACK`) was tested here.

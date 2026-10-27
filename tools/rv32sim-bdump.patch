@@ -1,0 +1,160 @@
+--- a/tools/rv32sim/soc.c	2026-10-27 13:37:24.237842429 -0400
++++ b/tools/rv32sim/soc.c	2026-10-27 13:37:24.246447582 -0400
+@@ -172,7 +172,7 @@
+ 
+ /* ---------------------------------------------------------------- blitter */
+ #define BQ 64
+-typedef struct { u32 w[8]; u64 done_at; } BCmd;
++typedef struct { u32 w[8]; u64 done_at; int fr; } BCmd;
+ static BCmd bq[BQ]; static int bq_head, bq_n; static u32 bw[8]; static int bwn;
+ static u64 blit_free_at;                   /* model cycle when the engine finishes the queued work */
+ static u32 b_dbase, b_dstride, b_tbase, b_tstride, b_fence, b_pal[4][256], b_pal_tag[4], b_pal_rr, b_cur_pal;
+@@ -245,8 +245,9 @@
+     default: return;
+     }
+ }
++#include "bdump.c"
+ static void blit_tick(void) {
+-    while (bq_n && bq[bq_head].done_at <= cycle) { blit_exec(bq[bq_head].w); bq_head = (bq_head + 1) % BQ; bq_n--; }
++    while (bq_n && bq[bq_head].done_at <= cycle) { bd_exec_hook(bq[bq_head].w, bq[bq_head].fr); blit_exec(bq[bq_head].w); bq_head = (bq_head + 1) % BQ; bq_n--; }
+ }
+ static void blit_push(u32 v) {
+     bw[bwn++] = v;
+@@ -269,14 +270,14 @@
+     }
+     u64 start = blit_free_at > cycle ? blit_free_at : cycle;
+     blit_free_at = start + cost; b_busy_total += cost; b_cmds_total++; S.blit_cyc += cost; S.blit_cmd++;
+-    BCmd *c = &bq[(bq_head + bq_n) % BQ]; memcpy(c->w, bw, 32); c->done_at = blit_free_at; bq_n++;
++    BCmd *c = &bq[(bq_head + bq_n) % BQ]; memcpy(c->w, bw, 32); c->done_at = blit_free_at; c->fr = presents; bq_n++;
+ }
+ static u32 blit_status(void) {
+     blit_tick();
+     u32 free_w = 512 - 8 * bq_n - bwn;
+     return (free_w << 16) | (bq_n ? 0 : 4) | (bq_n ? 1 : 0);
+ }
+-static void blit_drain(void) { while (bq_n) { blit_exec(bq[bq_head].w); bq_head = (bq_head + 1) % BQ; bq_n--; } }
++static void blit_drain(void) { while (bq_n) { bd_exec_hook(bq[bq_head].w, bq[bq_head].fr); blit_exec(bq[bq_head].w); bq_head = (bq_head + 1) % BQ; bq_n--; } }
+ 
+ /* ---------------------------------------------------------------- mixer */
+ static Mixer mixer; static u64 mx_ticks; static u32 mx_ctrl = 1;
+@@ -304,7 +305,7 @@
+ static void soc_frame_marker(int fr);
+ static void soc_dump_ramfs(void);
+ static void soc_finish(void) {
+-    blit_drain();
++    blit_drain(); bd_finish();
+     if (fbhash_f) fclose(fbhash_f);
+     if (wav_f) {
+         u32 data = (u32)(wav_frames * 4), v; uint16_t hh;
+@@ -395,6 +396,7 @@
+             fb_addr = v; fb_pend_vf = vid_frame();
+             present_hash(v);
+             presents++;
++            if (bd_from >= 0 && bd_state == 1 && presents > bd_to + 1) { blit_drain(); bd_finish(); }
+             if (stop_after >= 0 && presents > stop_after) { soc_frame_marker(-1); finish(0); }
+             break;
+         case 0x110: vid_ctrl = v; break;
+--- a/tools/rv32sim/rv32sim.c	2026-10-27 13:37:24.237885158 -0400
++++ b/tools/rv32sim/rv32sim.c	2026-10-27 13:37:24.246522143 -0400
+@@ -418,6 +418,7 @@
+         else if (!strcmp(o, "wav")) { wav_path = v; ai++; }
+         else if (!strcmp(o, "rtc")) { soc_rtc = (u32)strtoul(v, NULL, 0); ai++; }
+         else if (!strcmp(o, "ds-mbps")) { ds_mbps = atof(v); ai++; }
++        else if (!strcmp(o, "bdump")) { bd_from = bd_to = atoi(v); char *q = strchr(v, ':'); if (q && strchr(q + 1, ':') ) { bd_to = atoi(q + 1); q = strchr(q + 1, ':'); } bd_dir = strdup(q + 1); ai++; }
+         else if (!strcmp(o, "blitlog")) { blitlog_from = blitlog_to = atoi(v); if (strchr(v, '-')) blitlog_to = atoi(strchr(v, '-') + 1); ai++; }
+         else if (!strcmp(o, "fbdump")) { char *d = strdup(v), *c = strchr(d, ':'); if (!c) { fprintf(stderr, "--fbdump DIR:FROM[-TO]\n"); return 1; }
+             *c = 0; fbdump_dir = d; fbdump_from = fbdump_to = atoi(c + 1); if (strchr(c + 1, '-')) fbdump_to = atoi(strchr(c + 1, '-') + 1); ai++; }
+--- a/tools/rv32sim/bdump.c	1969-12-31 19:00:00.000000000 -0500
++++ b/tools/rv32sim/bdump.c	2026-10-27 13:37:24.246581319 -0400
+@@ -0,0 +1,91 @@
++/* --bdump N[:M]:DIR  capture the blitter command stream of frames N..M (commands pushed while presents
++ * is in N..M) as a core-template SoC benchmark (firmware/bench, tools/blitbench.py layout):
++ * the regions the commands touch are preloaded at their real SDRAM offsets from a snapshot taken
++ * before the first of these commands executes; expect = bm_run_mem on that snapshot. */
++static int bd_from = -1, bd_to = -1, bd_state; static char *bd_dir;
++static uint8_t *bd_s0; static u32 *bd_cmd; static int bd_n, bd_cap;
++static void bd_push(const u32 *w) {
++    if (bd_n + 8 > bd_cap) { bd_cap = bd_cap ? bd_cap * 2 : 4096; bd_cmd = realloc(bd_cmd, 4 * bd_cap); }
++    memcpy(bd_cmd + bd_n, w, 32); bd_n += 8;
++}
++typedef struct { u32 a, b; } BdR; static BdR *bdr; static int nbdr, capbdr;
++static void bd_reg(u64 a, u64 b) {
++    if (b <= a) return;
++    a &= ~63ull; b = (b + 63) & ~63ull; if (b > SD_SIZE) b = SD_SIZE;
++    if (nbdr == capbdr) { capbdr = capbdr ? capbdr * 2 : 1024; bdr = realloc(bdr, sizeof(BdR) * capbdr); }
++    bdr[nbdr].a = (u32)a; bdr[nbdr].b = (u32)b; nbdr++;
++}
++static int bd_cmp(const void *x, const void *y) { const BdR *p = x, *q = y; return p->a < q->a ? -1 : p->a > q->a; }
++static u32 bd_rd(u32 off) { u32 v; memcpy(&v, bd_s0 + (off & (SD_SIZE - 1)), 4); return v; }
++static void bd_finish(void) {
++    if (bd_state != 1) return;
++    bd_state = 2;
++    u32 fw[8] = { BM_FENCE | BM_IRQ, 0xD0D0, 0, 0, 0, 0, 0, 0 }; bd_push(fw);
++    /* relocate addresses to SDRAM offsets, collect regions */
++    u32 dbase = 0, dstride = 0, tbase = 0, tstride = 0; u64 dlo = ~0ull, dhi = 0; long px = 0, nd = 0;
++    for (int c = 0; c < bd_n; c += 8) {
++        u32 *w = bd_cmd + c; u32 op = BM_OP(w[0]);
++        if (op == BM_SET_DST) { w[1] &= SD_SIZE - 1; dbase = w[1]; dstride = w[2] & 0xFFFF; }
++        else if (op == BM_SET_TEX) { w[1] &= SD_SIZE - 1; w[3] &= SD_SIZE - 1; tbase = w[1]; tstride = w[2] & 0xFFFF; bd_reg(w[3], w[3] + 1024); }
++        else if (op <= BM_BLIT_MAP) {
++            u32 W = w[2] & 0xFFFF, H = w[2] >> 16, dx = w[1] & 0xFFFF, dy = w[1] >> 16, sx = w[3] & 0xFFFF, sy = w[3] >> 16;
++            if (!W || !H) continue;
++            nd++; px += (long)W * H;
++            u64 a = (u64)dbase + (u64)dy * dstride + dx * 4, b = (u64)dbase + (u64)(dy + H - 1) * dstride + (dx + W) * 4;
++            bd_reg(a, b); if (a < dlo) dlo = a; if (b > dhi) dhi = b;
++            if (op == BM_BLIT) bd_reg((u64)tbase + (u64)sy * tstride + sx, (u64)tbase + (u64)(sy + H - 1) * tstride + sx + W + 4);
++            if (op == BM_BLIT_MAP) {
++                w[6] &= SD_SIZE - 1; w[7] &= SD_SIZE - 1;
++                bd_reg(w[6], w[6] + 4 * W); bd_reg(w[7], w[7] + 4 * H);
++                int32_t x0 = 1 << 30, x1 = -1, y0 = 1 << 30, y1 = -1;
++                for (u32 i = 0; i < W; i++) { int32_t v = (int32_t)bd_rd(w[6] + 4 * i); if (v >= 0) { if (v < x0) x0 = v; if (v > x1) x1 = v; } }
++                for (u32 j = 0; j < H; j++) { int32_t v = (int32_t)bd_rd(w[7] + 4 * j); if (v >= 0) { if (v < y0) y0 = v; if (v > y1) y1 = v; } }
++                if (x1 >= 0 && y1 >= 0) bd_reg((u64)tbase + (u64)(sy + y0) * tstride + sx + x0, (u64)tbase + (u64)(sy + y1) * tstride + sx + x1 + 8);
++            }
++        }
++    }
++    dlo &= ~255ull;   /* the bench scans out from FB_ADDR = dbase rounded down to 256 */
++    bd_reg(dlo, dhi);
++    qsort(bdr, nbdr, sizeof(BdR), bd_cmp);
++    int m = 0;
++    for (int i = 0; i < nbdr; i++) {
++        if (m && bdr[i].a <= bdr[m - 1].b + 4096) { if (bdr[i].b > bdr[m - 1].b) bdr[m - 1].b = bdr[i].b; }
++        else bdr[m++] = bdr[i];
++    }
++    nbdr = m;
++    char p[1200]; mkdir(bd_dir, 0755);
++    snprintf(p, sizeof p, "%s/preload.txt", bd_dir); FILE *pl = fopen(p, "w");
++    u64 tot = 0;
++    for (int i = 0; i < nbdr; i++) {
++        if (bdr[i].b > 0x01000000u && bdr[i].a < 0x02000000u) { fprintf(stderr, "bdump: region %08x-%08x overlaps the bench header\n", bdr[i].a, bdr[i].b); exit(1); }
++        snprintf(p, sizeof p, "%s/r_%08x.le", bd_dir, bdr[i].a); FILE *o = fopen(p, "wb");
++        fwrite(bd_s0 + bdr[i].a, 1, bdr[i].b - bdr[i].a, o); fclose(o);
++        fprintf(pl, "+preload=%s@%x ", p, bdr[i].a); tot += bdr[i].b - bdr[i].a;
++    }
++    /* expect */
++    uint8_t *e = malloc(SD_SIZE); memcpy(e, bd_s0, SD_SIZE);
++    bm_run_mem(e, SD_SIZE, bd_cmd, bd_n);
++    u32 dw = (u32)((dhi - dlo + 3) / 4);
++    long diff_sim = 0; for (u32 i = 0; i < dw; i++) if (memcmp(e + dlo + 4 * i, M + SD_BASE + dlo + 4 * i, 4)) diff_sim++;
++    long changed = 0; for (u32 i = 0; i < dw; i++) if (memcmp(e + dlo + 4 * i, bd_s0 + dlo + 4 * i, 4)) changed++;
++    snprintf(p, sizeof p, "%s/expect.le", bd_dir); FILE *o = fopen(p, "wb"); fwrite(e + dlo, 4, dw, o); fclose(o);
++    snprintf(p, sizeof p, "%s/hdr.le", bd_dir); o = fopen(p, "wb");
++    u32 h[64] = { 0x484E4342u, (u32)bd_n, (u32)(dlo / 4), dw }; fwrite(h, 4, 64, o); fwrite(bd_cmd, 4, bd_n, o); fclose(o);
++    fprintf(pl, "+preload=%s/hdr.le@1000000 +preload=%s/expect.le@1800000\n", bd_dir, bd_dir); fclose(pl);
++    fprintf(stderr, "bdump: frames %d-%d: %d commands (%ld draws, %ld px), %d regions %llu KB, check %u words at %08llx (%ld changed by the frame), model vs sim: %ld words differ\n",
++            bd_from, bd_to, bd_n / 8, nd, px, nbdr, (unsigned long long)(tot >> 10), dw, (unsigned long long)dlo, changed, diff_sim);
++    free(e);
++}
++static void bd_exec_hook(const u32 *w, int fr) {
++    if (bd_from < 0 || bd_state == 2) return;
++    if (fr > bd_to) { bd_finish(); return; }
++    if (fr < bd_from) return;
++    if (bd_state == 0) {
++        bd_s0 = malloc(SD_SIZE); memcpy(bd_s0, M + SD_BASE, SD_SIZE); bd_state = 1;
++        u32 d[8] = { BM_SET_DST, b_dbase, b_dstride, 0, 0, 0, 0, 0 }; bd_push(d);
++        if (b_pal_valid[b_cur_pal]) { u32 t[8] = { BM_SET_TEX, b_tbase, b_tstride, b_pal_tag[b_cur_pal], 0, 0, 0, 0 }; bd_push(t); }
++    }
++    u32 c[8]; memcpy(c, w, 32);
++    if (BM_OP(c[0]) == BM_FENCE) c[0] &= ~BM_IRQ;
++    bd_push(c);
++}

@@ -225,8 +225,9 @@ input  wire        mem_rvalid        // read beat (one pulse per beat, in order)
 
 Protocol:
 - **Burst limits** (v0.4): 1..64 beats, and a burst must not cross a **2 KB SDRAM row** (`addr[10:2] + len <= 511`).
-  Long bursts are much cheaper per byte (see the cost line below). `periph_mem_port` uses up to 32 beats inside
-  aligned 128-byte blocks; the scanout uses 64-beat (256 B) bursts; the CPU ports and the APF bridge stay at 8.
+  Long bursts are much cheaper per byte (see the cost line below). The blitter (v0.7) uses up to 64 beats, cut
+  only at 2 KB rows; `periph_mem_port` (mixer) up to 32 beats inside aligned 128-byte blocks; the scanout uses
+  64-beat (256 B) bursts; the CPU ports and the APF bridge stay at 8.
 - **Command**: the master holds `valid`, `we`, `addr`, `len` until `ready`. `ready` may come many cycles
   later (arbitration, refresh). The command is accepted in the cycle with `valid & ready`.
 - **Write data** is pulled: beat 0 must be on `wdata/wstrb` when the command is presented. The arbiter
@@ -311,6 +312,11 @@ I$ invalidate: `fence.i`. The FPU must be enabled before use (`mstatus.FS`, done
 ## Changelog
 
 - v0.1 (2026-10-25): first draft.
+- v0.7 (2026-10-27, branch `ufo50-blit2`): **blitter throughput**. No register, command or port change: the
+  blitter drives its `X0` port directly with up to 64-beat accesses (cut at 2 KB rows), reads the destination
+  only for rows with a translucent texel, splits writes at transparent gaps and drops a `CLEAR` that the next
+  command (a `CLEAR` of the same rectangle) overwrites. Real Pocket game frames need 33-60% fewer blitter
+  cycles (`docs/BLITTER.md`, Throughput). `PERF_PIXELS` does not count a dropped `CLEAR`'s pixels.
 - v0.6 (2026-10-26, branch `ufo50-saves`): **saves**. Bridge reads of SDRAM (`bridge_sdram.v` read side with
   block prefetch and row-snoop invalidation; SDRAM port 1 now reads and writes), `DS_CMD` values 2 (0x0184)
   and 3 (0x0188, added to `core_bridge_cmd.v`), writable `DS_TABLE`, the save slot regions at `0x13E4_0000`
