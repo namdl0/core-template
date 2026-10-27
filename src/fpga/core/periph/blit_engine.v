@@ -506,4 +506,48 @@ module blit_engine #(
             end
         end
     end
+`ifdef BLIT_PROF
+    // ------------------------------------------------------------------ simulation-only profile
+    // (Verilator, -DBLIT_PROF): printed at every FENCE whose value is 0xD0D0 (firmware/bench).
+    reg [31:0] pr_st [0:15]; reg [31:0] pr_rdw, pr_wrw, pr_wrs, pr_crun, pr_cfetch, pr_cwr, pr_cdone,
+               pr_arb_me, pr_arb_oth, pr_arb_idle, pr_arb_ow, pr_arb_pm, pr_arb_none, pr_acc_r, pr_acc_w, pr_beat_r, pr_beat_w, pr_cmds, pr_rows;
+    integer pi;
+    initial begin for (pi = 0; pi < 16; pi = pi + 1) pr_st[pi] = 0;
+        pr_rdw = 0; pr_wrw = 0; pr_wrs = 0; pr_crun = 0; pr_cfetch = 0; pr_cwr = 0; pr_cdone = 0;
+        pr_arb_me = 0; pr_arb_oth = 0; pr_arb_idle = 0; pr_acc_r = 0; pr_acc_w = 0; pr_beat_r = 0; pr_beat_w = 0; pr_cmds = 0; pr_rows = 0; pr_arb_ow = 0; pr_arb_pm = 0; pr_arb_none = 0; end
+    always @(posedge clk) if (ms != M_IDLE || !cf_empty) begin
+        pr_st[ms] <= pr_st[ms] + 1;
+        if (ps == P_RD && !m_ready) pr_rdw <= pr_rdw + 1;
+        if (ps == P_WR && m_valid && !m_ready) pr_wrw <= pr_wrw + 1;
+        if (ps == P_WR && !m_valid) pr_wrs <= pr_wrs + 1;
+        if (rows_on) begin
+            if (c_run) pr_crun <= pr_crun + 1;
+            else if (!c_can) begin
+                if (c_row >= H) pr_cdone <= pr_cdone + 1;
+                else if (c_row >= fd_row) pr_cfetch <= pr_cfetch + 1;
+                else pr_cwr <= pr_cwr + 1;
+            end
+        end
+        if (vl_top.soc.arb.busy && vl_top.soc.arb.owner == 3'd5) pr_arb_me <= pr_arb_me + 1;
+        else if (vl_top.soc.arb.busy) pr_arb_oth <= pr_arb_oth + 1;
+        else if (vl_top.soc.arb.p_valid[5]) pr_arb_idle <= pr_arb_idle + 1;
+        else if (vl_top.soc.arb.p_valid != 0) pr_arb_ow <= pr_arb_ow + 1;
+        else if (m_valid) pr_arb_pm <= pr_arb_pm + 1;
+        else pr_arb_none <= pr_arb_none + 1;
+        if (vl_top.soc.arb.c_valid && vl_top.soc.arb.c_ready && vl_top.soc.arb.sel == 3'd5) begin
+            if (vl_top.soc.arb.c_we) begin pr_acc_w <= pr_acc_w + 1; pr_beat_w <= pr_beat_w + vl_top.soc.arb.c_len + 1; end
+            else begin pr_acc_r <= pr_acc_r + 1; pr_beat_r <= pr_beat_r + vl_top.soc.arb.c_len + 1; end
+        end
+        if (ms == M_DEC && cw[0][3:0] <= OP_MAP) pr_cmds <= pr_cmds + 1;
+        if (p7_v && p7_last) pr_rows <= pr_rows + 1;
+        if (ms == M_DEC && cw[0][3:0] == OP_FENCE && cw[1] == 32'hD0D0) begin
+            $display("BLITPROF draws %0d rows %0d | states idle %0d load %0d dec %0d wait(pal) %0d mxw %0d myw %0d init %0d init2 %0d rows %0d",
+                pr_cmds, pr_rows, pr_st[M_IDLE], pr_st[M_LOAD], pr_st[M_DEC], pr_st[M_WAIT], pr_st[M_MXW], pr_st[M_MYW], pr_st[M_INIT], pr_st[M_INIT2], pr_st[M_ROWS]);
+            $display("BLITPROF port: rd-wait %0d wr-wait %0d wr-starved %0d | compute run %0d stall-fetch %0d stall-write %0d drain %0d",
+                pr_rdw, pr_wrw, pr_wrs, pr_crun, pr_cfetch, pr_cwr, pr_cdone);
+            $display("BLITPROF sdram: blitter-owned %0d other-owned %0d idle: blitter cmd waiting %0d other waiting %0d engine req in port %0d nothing %0d | blitter acc rd %0d (%0d beats) wr %0d (%0d beats)",
+                pr_arb_me, pr_arb_oth, pr_arb_idle, pr_arb_ow, pr_arb_pm, pr_arb_none, pr_acc_r, pr_beat_r, pr_acc_w, pr_beat_w);
+        end
+    end
+`endif
 endmodule
