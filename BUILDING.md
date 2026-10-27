@@ -9,6 +9,30 @@ and shows the M3 exit test on screen. The memory map and peripheral contract is
 The steps below assume Windows. Linux works the same way. Use `python3` instead
 of `py`, and `/media/...` instead of `E:\`.
 
+## Blitter throughput (branch `ufo50-blit2`)
+
+`ufo50-blit2` = `ufo50-m5` (with saves) plus a faster blitter, nothing else: same registers, commands, data slots,
+SDRAM clocking (`SDRAM_2X = 0`) and file list (no `.qsf` change). The blitter now writes straight to the SDRAM port
+in long bursts, skips destination reads that cannot change the result, skips transparent gaps and drops a
+full-screen `CLEAR` that the next `CLEAR` overwrites (`docs/BLITTER.md`, Pipeline). On real frames of the
+blitter-bound games it needs 33-60% fewer cycles (Valbrace -60%, Hyper Contender -51%, Avianos -48%, Overbold
+-42%, Quibble Race -38%, Vainger -33%; Barbuta and the library -15%), every frame bit-exact with the C model.
+
+Build, package and copy exactly as for M5 (`git checkout ufo50-blit2`). Check in the compile report:
+- **Timing**: the 57.75 MHz clock (`general[0]`) must still have positive setup slack (M4 had Fmax 65.5 MHz).
+  If it fails, send the first lines of "Report Top Failing Paths".
+- **Resources**: expect roughly +400-600 ALMs and +1-2 M10K blocks over the M5 build.
+
+On the Pocket:
+- **M4 test screen** (no `ufo50rt.bin`, or hold L3 off): the line `BLIT 11 cmds vs C model PASS` must still say
+  PASS; its cycle count drops (simulation: 50,277 -> 43,849). In the blitter demo (SELECT) the `blit <N>k cyc`
+  number should be lower than with the M5 build.
+- **Games**: Valbrace, Hyper Contender, Overbold, Avianos, Quibble Race, Party House, Night Manor, Rakshasa,
+  Star Waspir should run noticeably smoother; Vainger stays mostly CPU-bound. Look for any wrong pixels
+  (missing or garbled sprites, translucent effects - shadows, glows, fades - drawn wrong, a frame that is not
+  cleared): the hardware was checked bit-exact in simulation, so any difference is worth a photo.
+- If anything is wrong, flash the M5/saves bitstream again; nothing else on the SD card changes.
+
 ## M5 (branch `ufo50-m5`): fast SDRAM and the game runtime
 
 `ufo50-m5` = M4 plus:
