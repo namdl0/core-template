@@ -95,6 +95,9 @@ static int gen_random(int n, const char *dir) {
             w[6] = tx; w[7] = ty;
         }
         emit(w);
+        /* same-rectangle CLEAR chains (the hardware drops all but the last one) */
+        if (op == BM_CLEAR && rr(3) == 0) { int k = 1 + rr(3); while (k--) { w[4] = rnd(); emit(w); } }
+        if (op == BM_CLEAR && rr(4) == 0) { w[1] ^= 1; emit(w); }   /* a different rectangle right after */
     }
     memset(w, 0, sizeof w); w[0] = BM_FENCE | BM_IRQ; w[1] = 0xF00D0000u | (uint32_t)n; emit(w);
     write_out(dir, surf / 4, SSTR * SH / 4);

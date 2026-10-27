@@ -71,7 +71,12 @@ module blit_engine #(
     reg [3:0] ld_req, ld_got;   // words popped / captured
     reg       cf_rd_d;
     assign cf_rd = (ms == M_LOAD) && !cf_empty && ld_req != 4'd8;
-    assign busy = (ms != M_IDLE) || !cf_empty;
+    // CLEAR coalescing: a CLEAR is held back (cl_pend) until the next command arrives; if that is a
+    // CLEAR of the same rectangle on the same surface (nothing in between), the first one is
+    // dropped (its pixels would all be overwritten). Anything else, or 256 idle cycles with an empty
+    // FIFO, executes it first; cl_replay then re-decodes the command that is still in cw[].
+    reg        cl_pend, cl_replay; reg [31:0] cl_w1, cl_w2, cl_col; reg [7:0] cl_hold;
+    assign busy = (ms != M_IDLE) || !cf_empty || cl_pend;
 
     // job interface to the read requester
     reg        job_valid; reg [2:0] job_kind; reg job_slot; reg [31:0] job_addr; reg [10:0] job_nw;
@@ -232,7 +237,6 @@ module blit_engine #(
 
     // ------------------------------------------------------------------ compute stage
     reg [15:0] ci; reg c_run; reg c_slot;
-    reg [1:0]  any; reg [9:0] first0, first1, last0, last1;
     wire c_can = rows_on && !c_run && c_row < fd_row && c_row < w_row + 2'd2 && c_row < H;
     // P0 -> RAM addresses
     assign mx_ra = ci[8:0];
@@ -335,30 +339,63 @@ module blit_engine #(
             end
         end
     end
-    // span tracking + computed-row count
+    // ------------------------------------------------------------------ write segments
+    // Each computed row's written pixels are cut into segments wherever SEG_GAP or more pixels in a
+    // row are not written (transparent texels, BLIT_MAP skips): a gap costs 2 clocks per pixel on the
+    // 16-bit SDRAM inside a burst, a new access ~8. segram: 2 slots x 256 x {start, end}.
+    localparam SEG_GAP = 10'd5;
+    reg        sg_we; reg [8:0] sg_wa; reg [17:0] sg_wd; reg [8:0] sg_ra; wire [17:0] sg_rd;
+    periph_ram #(.AW(9), .DW(18)) segram (.clk(clk), .we(sg_we), .wa(sg_wa), .wd(sg_wd), .ra(sg_ra), .rd(sg_rd));
+    reg  [8:0] seg_n0, seg_n1;              // segments of the row in slot 0 / 1
+    reg        so_v; reg [9:0] so_s, so_l;  // open segment of the row being computed
+    reg        sq_v; reg sq_slot; reg [17:0] sq_wd;   // second segment closed at a row's last pixel
+    reg  [1:0] comp_d;                      // a row counts as computed 2 cycles after its last pixel
+    wire       sp_split = p7_mask && so_v && (p7_i - so_l > SEG_GAP);
+    wire       sp_open  = so_v || p7_mask;
+    wire [9:0] sp_s     = (p7_mask && (!so_v || sp_split)) ? p7_i : so_s;
+    wire [9:0] sp_l     = p7_mask ? p7_i : so_l;
     always @(posedge clk) begin
-        if (rst || !rows_on) begin any <= 0; comp <= 0; end
+        sg_we <= 0;
+        if (rst || !rows_on) begin seg_n0 <= 0; seg_n1 <= 0; comp <= 0; so_v <= 0; sq_v <= 0; comp_d <= 0; end
         else begin
-            if (c_can) any[c_row[0]] <= 0;
-            if (p7_v && p7_mask) begin
-                if (p7_slot) begin if (!any[1]) first1 <= p7_i; last1 <= p7_i; any[1] <= 1; end
-                else         begin if (!any[0]) first0 <= p7_i; last0 <= p7_i; any[0] <= 1; end
+            if (c_can) begin if (c_row[0]) seg_n1 <= 0; else seg_n0 <= 0; end
+            comp_d <= {comp_d[0], p7_v && p7_last};
+            if (comp_d[1]) comp <= comp + 1'b1;
+            if (sq_v) begin   // the queued close (never two in a row: a new row's first pixel closes nothing)
+                sg_we <= 1; sg_wa <= {sq_slot, sq_slot ? seg_n1[7:0] : seg_n0[7:0]}; sg_wd <= sq_wd;
+                if (sq_slot) seg_n1 <= seg_n1 + 1'b1; else seg_n0 <= seg_n0 + 1'b1;
+                sq_v <= 0;
             end
-            if (p7_v && p7_last) comp <= comp + 1'b1;
+            if (p7_v) begin
+                if (sp_split) begin
+                    sg_we <= 1; sg_wa <= {p7_slot, p7_slot ? seg_n1[7:0] : seg_n0[7:0]}; sg_wd <= {so_s[8:0], so_l[8:0]};
+                    if (p7_slot) seg_n1 <= seg_n1 + 1'b1; else seg_n0 <= seg_n0 + 1'b1;
+                end
+                if (p7_last) begin
+                    so_v <= 0;
+                    if (sp_open) begin
+                        if (sp_split) begin sq_v <= 1; sq_slot <= p7_slot; sq_wd <= {sp_s[8:0], sp_l[8:0]}; end
+                        else begin
+                            sg_we <= 1; sg_wa <= {p7_slot, p7_slot ? seg_n1[7:0] : seg_n0[7:0]}; sg_wd <= {sp_s[8:0], sp_l[8:0]};
+                            if (p7_slot) seg_n1 <= seg_n1 + 1'b1; else seg_n0 <= seg_n0 + 1'b1;
+                        end
+                    end
+                end else begin
+                    so_v <= sp_open; so_s <= sp_s; so_l <= sp_l;
+                end
+            end
         end
     end
 
     // ------------------------------------------------------------------ write stage
-    localparam W_IDLE = 2'd0, W_SET = 2'd1, W_BURST = 2'd2;
-    reg [1:0]  ws;
+    localparam W_IDLE = 3'd0, W_SET = 3'd1, W_BURST = 3'd2, W_SEGW = 3'd3, W_SEG = 3'd4;
+    reg [2:0]  ws;
     reg [9:0]  w_rdi, w_end; reg [9:0] w_rem;
-    reg        w_slot; reg [31:0] w_baddr;
+    reg        w_slot; reg [31:0] w_baddr; reg [8:0] w_seg, w_nseg;
     wire       w_ready_row = rows_on && w_row < comp;
-    wire [9:0] w_first = w_row[0] ? first1 : first0;
-    wire [9:0] w_last  = w_row[0] ? last1  : last0;
-    wire       w_any   = any[w_row[0]];
+    wire [8:0] w_rown = w_row[0] ? seg_n1 : seg_n0;
     // keep the skid topped up to 3 beats, counting the pop of this cycle (sustains 1 beat/clock)
-    wire       ob_rd_en = (ws != W_IDLE) && (w_rdi <= w_end) && ({1'b0, sk_cnt} + ob_inflight < 4'd3 + sk_pop);
+    wire       ob_rd_en = (ws == W_SET || ws == W_BURST) && (w_rdi <= w_end) && ({1'b0, sk_cnt} + ob_inflight < 4'd3 + sk_pop);
     // next access: up to MAX_BURST beats, never past the 2 KB SDRAM row
     wire [9:0] w_room = 10'd512 - {1'b0, w_baddr[10:2]};
     wire [9:0] w_cap  = (w_room < MAX_BURST) ? w_room : MAX_BURST;
@@ -375,13 +412,19 @@ module blit_engine #(
             if (ob_rd_en) w_rdi <= w_rdi + 1'b1;
             case (ws)
                 W_IDLE: if (w_ready_row) begin
-                    if (!w_any) begin w_row <= w_row + 1'b1; w_addr <= w_addr + dst_stride; end
+                    if (w_rown == 0) begin w_row <= w_row + 1'b1; w_addr <= w_addr + dst_stride; end
                     else begin
-                        w_slot <= w_row[0]; w_rdi <= w_first; w_end <= w_last;
-                        w_rem <= w_last - w_first + 1'b1;
-                        w_baddr <= w_addr + {w_first, 2'b00};
-                        ws <= W_SET;
+                        w_slot <= w_row[0]; w_seg <= 0; w_nseg <= w_rown;
+                        sg_ra <= {w_row[0], 8'd0};
+                        ws <= W_SEGW;
                     end
+                end
+                W_SEGW: ws <= W_SEG;            // segram read latency
+                W_SEG: begin
+                    w_rdi <= {1'b0, sg_rd[17:9]}; w_end <= {1'b0, sg_rd[8:0]};
+                    w_rem <= {1'b0, sg_rd[8:0]} - {1'b0, sg_rd[17:9]} + 1'b1;
+                    w_baddr <= w_addr + {sg_rd[17:9], 2'b00};
+                    ws <= W_SET;
                 end
                 W_SET: begin
                     wb_addr <= w_baddr;
@@ -394,9 +437,12 @@ module blit_engine #(
                     if (sk_pop) wb_left <= wb_left - 1'b1;
                     if (wr_burst_done) begin
                         w_rem <= w_rem - wb_len; w_baddr <= w_baddr + {wb_len, 2'b00};
-                        if (w_rem == {1'b0, wb_len}) begin
+                        if (w_rem != {1'b0, wb_len}) ws <= W_SET;
+                        else if (w_seg + 1'b1 != w_nseg) begin
+                            w_seg <= w_seg + 1'b1; sg_ra <= {w_slot, w_seg[7:0] + 8'd1}; ws <= W_SEGW;
+                        end else begin
                             w_row <= w_row + 1'b1; w_addr <= w_addr + dst_stride; ws <= W_IDLE;
-                        end else ws <= W_SET;
+                        end
                     end
                 end
                 default: ws <= W_IDLE;
@@ -411,7 +457,7 @@ module blit_engine #(
         cf_rd_d <= cf_rd;
         if (rst) begin
             ms <= M_IDLE; fs <= F_IDLE; job_valid <= 0; issued_total <= 0;
-            pal_valid <= 0; pal_rr <= 0; pal_cur <= 0; fence <= 0;
+            pal_valid <= 0; pal_rr <= 0; pal_cur <= 0; fence <= 0; cl_pend <= 0; cl_replay <= 0;
             perf_busy <= 0; perf_pixels <= 0; perf_memwait <= 0;
             dst_base <= 0; dst_stride <= 0; tex_base <= 0; tex_stride <= 0;
         end else begin
@@ -434,12 +480,26 @@ module blit_engine #(
             end
             case (ms)
                 M_IDLE: if (!cf_empty) begin ms <= M_LOAD; ld_req <= 0; ld_got <= 0; end
+                    else if (cl_pend) begin
+                        if (cl_hold != 0) cl_hold <= cl_hold - 1'b1;
+                        else begin
+                        op <= OP_CLEAR; flipx <= 0; flipy <= 0; blend <= 0; fog <= 0; alt1 <= 0;
+                        dx <= cl_w1[15:0]; dy <= cl_w1[31:16]; W <= cl_w2[15:0]; H <= cl_w2[31:16];
+                        clear_col <= cl_col; cl_pend <= 0; ms <= M_INIT; cl_replay <= 0;
+                        end
+                    end
                 M_LOAD: begin
                     if (cf_rd) ld_req <= ld_req + 1'b1;
                     if (cf_rd_d) begin cw[ld_got[2:0]] <= cf_data; ld_got <= ld_got + 1'b1; end
                     if (ld_got == 4'd8) ms <= M_DEC;
                 end
-                M_DEC: begin
+                M_DEC: if (cl_pend && !(cw[0][3:0] == OP_CLEAR && cw[1] == cl_w1 && cw[2] == cl_w2)) begin
+                        op <= OP_CLEAR; flipx <= 0; flipy <= 0; blend <= 0; fog <= 0; alt1 <= 0;
+                        dx <= cl_w1[15:0]; dy <= cl_w1[31:16]; W <= cl_w2[15:0]; H <= cl_w2[31:16];
+                        clear_col <= cl_col; cl_pend <= 0; ms <= M_INIT; cl_replay <= 1;
+                end else if (cw[0][3:0] == OP_CLEAR && cw[2][15:0] != 0 && cw[2][31:16] != 0) begin
+                    cl_pend <= 1; cl_w1 <= cw[1]; cl_w2 <= cw[2]; cl_col <= cw[4]; cl_hold <= 8'd255; ms <= M_IDLE;
+                end else begin
                     op <= cw[0][3:0]; flipx <= cw[0][4]; flipy <= cw[0][5]; blend <= cw[0][7:6]; fog <= cw[0][8];
                     dx <= cw[1][15:0]; dy <= cw[1][31:16]; W <= cw[2][15:0]; H <= cw[2][31:16];
                     sx <= cw[3][15:0]; sy <= cw[3][31:16]; colour <= cw[4][23:0]; clear_col <= cw[4];
@@ -494,7 +554,7 @@ module blit_engine #(
                     fs <= F_IDLE;
                     ms <= M_ROWS;
                 end
-                M_ROWS: if (w_row == H && !job_valid) ms <= M_IDLE;
+                M_ROWS: if (w_row == H && !job_valid) begin ms <= cl_replay ? M_DEC : M_IDLE; cl_replay <= 0; end
                 default: ms <= M_IDLE;
             endcase
 
@@ -591,7 +651,7 @@ module blit_engine #(
             if (vl_top.soc.arb.c_we) begin pr_acc_w <= pr_acc_w + 1; pr_beat_w <= pr_beat_w + vl_top.soc.arb.c_len + 1; end
             else begin pr_acc_r <= pr_acc_r + 1; pr_beat_r <= pr_beat_r + vl_top.soc.arb.c_len + 1; end
         end
-        if (ms == M_DEC && cw[0][3:0] <= OP_MAP) pr_cmds <= pr_cmds + 1;
+        if (ms == M_INIT) pr_cmds <= pr_cmds + 1;
         if (p7_v && p7_last) pr_rows <= pr_rows + 1;
         if (ms == M_DEC && cw[0][3:0] == OP_FENCE && cw[1] == 32'hD0D0) begin
             $display("BLITPROF draws %0d rows %0d | states idle %0d load %0d dec %0d wait(pal) %0d mxw %0d myw %0d init %0d init2 %0d rows %0d",

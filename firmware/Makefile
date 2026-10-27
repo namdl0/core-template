@@ -29,6 +29,13 @@ build/benchmix/boot_b0.hex: common/crt0.S common/libc_min.c bench/main.c common/
 	$(CC) $(CFLAGS) -DSIM -DMIXSTRESS $(LDFLAGS) -o build/benchmix/bench.elf common/crt0.S common/libc_min.c bench/main.c -lgcc
 	$(OBJCOPY) -O binary build/benchmix/bench.elf build/benchmix/bench.bin
 	$(PYTHON) ../tools/bin2hex.py build/benchmix/bench.bin build/benchmix/boot 32768
+# make benchns: the same with the framebuffer scanout off (blitter cycles without video contention)
+benchns: build/benchns/boot_b0.hex
+build/benchns/boot_b0.hex: common/crt0.S common/libc_min.c bench/main.c common/*.h common/link.ld
+	@mkdir -p build/benchns
+	$(CC) $(CFLAGS) -DSIM -DNOSCAN $(LDFLAGS) -o build/benchns/bench.elf common/crt0.S common/libc_min.c bench/main.c -lgcc
+	$(OBJCOPY) -O binary build/benchns/bench.elf build/benchns/bench.bin
+	$(PYTHON) ../tools/bin2hex.py build/benchns/bench.bin build/benchns/boot 32768
 bench: build/bench/boot_b0.hex
 build/bench/boot_b0.hex: common/crt0.S common/libc_min.c bench/main.c common/*.h common/link.ld
 	@mkdir -p build/bench
