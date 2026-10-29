@@ -11,6 +11,10 @@
  *   8..15  D$ size: cycles of one pass of 32-byte-stride loads over the same footprints (3rd pass)
  *   16     interpreter-like mix: skewed random calls over ~100 KiB of code + loads from a 48 KiB table
  *   17     the same with dcache_invalidate() every 256 calls (the runtime invalidates per frame / DMA)
+ *   18     stores: 64 KiB written word by word (write-through, no allocate)
+ *   19     the hello firmware's march: 256 KiB written, dcache_invalidate(), read back and checked
+ *   20     hello's mem_test() itself on 64 KiB at HEAP_BASE (two passes)
+ *   21..28 hello's march write loop (16384 stores) at word offset 0..7 of an I$ line (align.S)
  */
 #include <stdint.h>
 #define DEBUG_OUT (*(volatile uint32_t *)0x80000FFCu)
@@ -28,6 +32,18 @@ static volatile uint32_t sink;
 
 static uint32_t code_pass(int n) { uint32_t x = 1; for (int i = 0; i < n; i++) x = ftab[i](x); return x; }
 static uint32_t data_pass(int words) { uint32_t s = 0; for (int i = 0; i < words; i += 8) s += table[i]; return s; }
+__attribute__((noinline)) static int mem_test(uint32_t base, uint32_t bytes)
+{
+    uint32_t *p = (uint32_t *)(uintptr_t)base;
+    uint32_t n = bytes / 4;
+    for (int pass_no = 0; pass_no < 2; pass_no++) {
+        uint32_t seed = pass_no ? 0xFFFFFFFFu : 0;
+        for (uint32_t i = 0; i < n; i++) p[i] = ((base + i * 4) * 2654435761u) ^ seed;
+        __asm__ volatile (".word 0x0000500F" ::: "memory");
+        for (uint32_t i = 0; i < n; i++) if (p[i] != (((base + i * 4) * 2654435761u) ^ seed)) return 0;
+    }
+    return 1;
+}
 
 int main(void)
 {
@@ -62,7 +78,33 @@ int main(void)
         }
         sink = x; result(16 + v, rdcycle() - t0);
     }
-    put(0x01, 0); put(0xFF, 0);
+    {
+        volatile uint32_t *w = (volatile uint32_t *)0x13100000u;
+        uint32_t t0 = rdcycle();
+        for (int i = 0; i < 16384; i++) w[i] = (uint32_t)i;
+        result(18, rdcycle() - t0);
+        uint32_t *m = (uint32_t *)0x13200000u, bad = 0;
+        t0 = rdcycle();
+        for (uint32_t i = 0; i < 65536; i++) m[i] = i * 2654435761u;
+        dcache_invalidate();
+        for (uint32_t i = 0; i < 65536; i++) bad += m[i] != i * 2654435761u;
+        result(19, rdcycle() - t0);
+        t0 = rdcycle();
+        int ok = mem_test(0x13100000u, 65536u);
+        result(20, rdcycle() - t0);
+        typedef void (*sl_t)(volatile uint32_t *, uint32_t);
+        extern void store_loop_0(volatile uint32_t *, uint32_t), store_loop_1(volatile uint32_t *, uint32_t),
+            store_loop_2(volatile uint32_t *, uint32_t), store_loop_3(volatile uint32_t *, uint32_t),
+            store_loop_4(volatile uint32_t *, uint32_t), store_loop_5(volatile uint32_t *, uint32_t),
+            store_loop_6(volatile uint32_t *, uint32_t), store_loop_7(volatile uint32_t *, uint32_t);
+        static const sl_t sl[8] = { store_loop_0, store_loop_1, store_loop_2, store_loop_3,
+                                    store_loop_4, store_loop_5, store_loop_6, store_loop_7 };
+        for (int k = 0; k < 8; k++) {
+            t0 = rdcycle(); sl[k]((volatile uint32_t *)0x13100000u, 16384u); result(21 + k, rdcycle() - t0);
+        }
+        put(0x01, bad + !ok);
+    }
+    put(0xFF, 0);
     DEBUG_OUT = 0x45000000u;   /* DBG_EXIT 0 (rv32sim) */
     for (;;) { }
 }

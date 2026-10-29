@@ -134,10 +134,16 @@ static inline uint64_t mtime64(void)
 
 /* VexRiscv data cache: invalidate all lines (custom instruction, rs1 = x0).
  * Needed before reading SDRAM that hardware wrote (data slots, blitter) through
- * the cached window. The D$ is write-through, so nothing is lost. */
+ * the cached window. The D$ is write-through, so nothing is lost.
+ * The nop matters: VexRiscv's D$ flusher starts as soon as the instruction reaches the execute
+ * stage, before an older branch in the memory stage has resolved. An invalidate placed right after
+ * a mispredicted branch (the fall-through of `if (x) dcache_invalidate();`, or the exit of a loop)
+ * therefore flushes the whole D$ (one cycle per set: 256 with 16 KB, 512 with 32 KB) even when
+ * that path is not taken - once per loop iteration in the hello march test. With the nop first,
+ * the wrong-path slot after a branch holds the nop and the invalidate is squashed in decode. */
 static inline void dcache_invalidate(void)
 {
-    __asm__ volatile (".word 0x0000500F" ::: "memory");
+    __asm__ volatile ("nop\n\t.word 0x0000500F" ::: "memory");
 }
 static inline void icache_invalidate(void) { __asm__ volatile ("fence.i" ::: "memory"); }
 
