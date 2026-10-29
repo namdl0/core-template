@@ -81,6 +81,12 @@ module ufo50_soc #(
 // ===========================================================================
 // CPU
 // ===========================================================================
+    // Cache configuration cpu/VexRiscv.v was generated with (cpu/README.md: ICACHE_KB, DCACHE_KB,
+    // CACHE_WAYS). Reported in SYS_CONFIG; change together with VexRiscv.v.
+    localparam [7:0] ICACHE_KB   = 8'd64;
+    localparam [7:0] DCACHE_KB   = 8'd32;
+    localparam [3:0] ICACHE_WAYS = 4'd2;
+    localparam [3:0] DCACHE_WAYS = 4'd2;
     wire        iBus_cmd_valid;
     wire        iBus_cmd_ready;
     wire [31:0] iBus_cmd_payload_address;
@@ -599,8 +605,9 @@ always @(posedge clk_sys) begin
                 12'h000: sys_dat_r <= 32'h5546_3530;
                 12'h004: sys_dat_r <= 32'h0003_0000;
                 12'h008: sys_dat_r <= CLK_SYS_HZ;
-                // I$ 16 KB, D$ 16 KB, 2 ways each, FPU-D, blitter/mixer presence from their modules
-                12'h00C: sys_dat_r <= {5'd0, mix_present, blit_present, 1'b1, 4'd2, 4'd2, 8'd16, 8'd16};
+                // cache sizes / ways of cpu/VexRiscv.v (localparams below), FPU-D, blitter/mixer presence
+                12'h00C: sys_dat_r <= {5'd0, mix_present, blit_present, 1'b1, DCACHE_WAYS[3:0], ICACHE_WAYS[3:0],
+                                       DCACHE_KB[7:0], ICACHE_KB[7:0]};
                 12'h010: begin sys_dat_r <= mtime[31:0]; mtime_hi_latch <= mtime[63:32]; end
                 12'h014: sys_dat_r <= mtime_hi_latch;
                 12'h018: sys_dat_r <= mtimecmp[31:0];

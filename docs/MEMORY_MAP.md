@@ -276,8 +276,10 @@ line (vs 24), about 50% of SDRAM time during active lines and ~25% averaged over
 
 ## 7. CPU configuration
 
-VexRiscv (SpinalHDL, MIT), single core, RV32IMFD (+Zicsr, Zifencei), ilp32d, machine mode only, 16 KB 2-way
-I$ and D$ (32-byte lines, D$ write-through, 64-bit data path), 57.75 MHz. See `src/fpga/core/cpu/README.md`
+VexRiscv (SpinalHDL, MIT), single core, RV32IMFD (+Zicsr, Zifencei), ilp32d, machine mode only, 64 KB 2-way
+I$ and 32 KB 2-way D$ (branch `ufo50-cache`; 16 KB + 16 KB before; 32-byte lines, D$ write-through, 64-bit
+data path), 57.75 MHz. Read the sizes from `SYS_CONFIG` rather than assuming them. `dcache_invalidate()`
+stalls the CPU one cycle per D$ set (512 with 32 KB 2-way, was 256); `fence.i` one per I$ set (1024, was 256). See `src/fpga/core/cpu/README.md`
 for the exact generator configuration and how to regenerate.
 Toolchain flags: `-march=rv32imfd_zicsr_zifencei -mabi=ilp32d`.
 `rdcycle`/`rdcycleh`, `rdinstret` work. D$ invalidate: `dcache_invalidate()` (instruction `0x0000500F`);
@@ -312,6 +314,8 @@ I$ invalidate: `fence.i`. The FPU must be enabled before use (`mstatus.FS`, done
 ## Changelog
 
 - v0.1 (2026-10-25): first draft.
+- v0.8 (2026-10-28, branch `ufo50-cache`): **bigger CPU caches**, I$ 16 -> 64 KB, D$ 16 -> 32 KB (both still
+  2-way, 32-byte lines). `SYS_CONFIG` reports 64 / 32. No register, port or memory-map change.
 - v0.7 (2026-10-27, branch `ufo50-blit2`): **blitter throughput**. No register, command or port change: the
   blitter drives its `X0` port directly with up to 64-beat accesses (cut at 2 KB rows), reads the destination
   only for rows with a translucent texel, splits writes at transparent gaps and drops a `CLEAR` that the next

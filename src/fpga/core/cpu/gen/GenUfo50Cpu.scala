@@ -1,4 +1,4 @@
-// UFO50 Pocket SoC CPU: VexRiscv RV32IMFD, 16 KB 2-way I$ + 16 KB 2-way D$, machine mode only.
+// UFO50 Pocket SoC CPU: VexRiscv RV32IMFD, 64 KB 2-way I$ + 32 KB 2-way D$ (defaults), machine mode only.
 // Generator for SpinalHDL/VexRiscv (MIT). Output: VexRiscv.v with native cache buses
 // (iBus_cmd/rsp, dBus_cmd/rsp), timerInterrupt, externalInterrupt, softwareInterrupt.
 package vexriscv.demo
@@ -11,8 +11,8 @@ import vexriscv.{VexRiscv, VexRiscvConfig, Riscv, plugin}
 
 object GenUfo50Cpu extends App {
   def env(n: String, d: Int) = sys.env.get(n).map(_.toInt).getOrElse(d)
-  val iKB   = env("ICACHE_KB", 16)
-  val dKB   = env("DCACHE_KB", 16)
+  val iKB   = env("ICACHE_KB", 64)
+  val dKB   = env("DCACHE_KB", 32)
   val ways  = env("CACHE_WAYS", 2)
   val fpu   = env("FPU", 2)          // 0 none, 1 F, 2 F+D
   val misa  = Riscv.misaToInt("im" + (if (fpu >= 1) "f" else "") + (if (fpu >= 2) "d" else ""))

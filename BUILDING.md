@@ -90,7 +90,7 @@ periph agent's estimate; the 57.75 MHz clock must still have positive slack, see
 
 | Path | What it is |
 |---|---|
-| `src/fpga/core/cpu/VexRiscv.v` | Generated CPU (RV32IMFD, 16 KB 2-way I$/D$). `cpu/README.md`: configuration, licence, how to regenerate |
+| `src/fpga/core/cpu/VexRiscv.v` | Generated CPU (RV32IMFD, 16 KB 2-way I$/D$; 64 KB / 32 KB since `ufo50-cache`). `cpu/README.md`: configuration, licence, how to regenerate |
 | `src/fpga/core/soc/` | SoC: `ufo50_soc.v` (bus fabric, boot RAM, system registers), `sdram_ctrl.v` + `sdram_arb.v`, `vid_scanout.v`, `bridge_sdram.v` (APF -> SDRAM), `dataslot_ctrl.v` (target command 0x0180), `ufo50_blitter.v` / `ufo50_mixer.v` (M3 stubs, replaced in M4/M6) |
 | `src/fpga/core/mf_pllsys.v` | System PLL, 74.25 -> 57.75 MHz |
 | `src/fpga/core/fw/boot_b0..3.hex` | The hello firmware, preloaded into the 32 KB boot RAM by the bitstream |
@@ -228,7 +228,7 @@ browser for it (choose it) and a short loading bar.
    ```
    UFO50 Pocket SoC - M3 hello
    CPU  VexRiscv RV32IMFD  57.750 MHz
-        I$ 16K 2-way  D$ 16K 2-way  FPU F+D
+        I$ 16K 2-way  D$ 16K 2-way  FPU F+D      (ufo50-cache: I$ 64K 2-way  D$ 32K 2-way)
         measured 57.750 MHz (rdcycle 57.750)
    SLOT 0:4194304
         slot0 crc32 1A2B3C4D  1.30 s

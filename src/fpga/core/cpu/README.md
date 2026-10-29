@@ -18,8 +18,9 @@ a single core without the SMP/MMU logic, and native cache buses instead of LiteX
 | Pipeline | 5 stages, full bypass, dynamic branch prediction with target cache (1024-entry history) |
 | Multiply / divide | `MulPlugin` (DSP blocks), `MulDivIterativePlugin` divide (34 cycles) |
 | FPU | `FpuPlugin` + internal `FpuCore`, single and double precision (`withDouble = true`); fdiv/fsqrt iterative |
-| I$ | **16 KB, 2-way**, 32-byte lines, 32-bit refill bus (`iBus_*`) |
-| D$ | **16 KB, 2-way**, 32-byte lines, write-through, 64-bit CPU and memory width (`dBus_*`, needed for `fld`/`fsd`) |
+| I$ | **64 KB, 2-way** (branch `ufo50-cache`; 16 KB before), 32-byte lines, 32-bit refill bus (`iBus_*`) |
+| D$ | **32 KB, 2-way** (16 KB before), 32-byte lines, write-through, 64-bit CPU and memory width (`dBus_*`, needed for `fld`/`fsd`) |
+| Replacement | I$: the way a free-running counter points at; D$: one round-robin pointer for all sets (VexRiscv's own policies, no LRU) |
 | I/O (uncached) regions | `0x5xxxxxxx` (SDRAM alias) and `0x8xxxxxxx`-`0xFxxxxxxx` |
 | Reset vector | `0x00000000` (boot RAM); `mtvec` reset value `0x20` (firmware sets it) |
 | CSRs | `mcycle`/`minstret` (+ user `cycle`/`instret` read-only), `mtvec`, `mepc`, `mcause`, `mtval`, `mscratch`, `mie`/`mip`, `misa` |
@@ -34,9 +35,18 @@ Bus protocols (native VexRiscv cache buses, adapted in `soc/ufo50_soc.v`):
 
 ## Regenerating
 
-Change the parameters with environment variables (defaults in brackets): `ICACHE_KB` [16], `DCACHE_KB` [16],
+Change the parameters with environment variables (defaults in brackets): `ICACHE_KB` [64], `DCACHE_KB` [32],
 `CACHE_WAYS` [2], `FPU` [2 = F+D, 1 = F only, 0 = none], `DBUS_WIDTH` [64 with D, else 32].
-If you change cache sizes, also change the `SYS_CONFIG` value in `soc/ufo50_soc.v` (register `0x00C`).
+If you change cache sizes, also change the `ICACHE_KB` / `DCACHE_KB` / `*_WAYS` localparams in `soc/ufo50_soc.v`
+(reported in `SYS_CONFIG`, register `0x00C`). No size limit applies here: the 4 KB-per-way rule in
+`IBusCachedPlugin`/`DBusCachedPlugin` is only for configurations with an MMU (`memoryTranslatorPortConfig`),
+and this CPU has `StaticMemoryTranslatorPlugin` only. Keep each way's data RAM at most 8192 words deep
+(I$ 2-way: up to 64 KB, D$ 2-way with 64-bit words: up to 128 KB), the deepest an M10K goes without an
+output mux.
+
+The committed `VexRiscv.v` is the default build (`ICACHE_KB=64 DCACHE_KB=32 CACHE_WAYS=2`, VexRiscv
+baf7dc8, SpinalHDL v1.13.0). With `ICACHE_KB=16 DCACHE_KB=16` the same script reproduces the 16 KB file of
+`ufo50-blit2` byte for byte; the diff between the two is only address/tag widths and RAM depths.
 
 **With sbt (normal PC with internet access):**
 ```
@@ -56,8 +66,10 @@ which are only needed for simulation features. Takes about 5 minutes on 2 cores.
 
 ## Resource and timing notes
 
-- Expected size (estimate, not yet measured in Quartus): CPU core ~1.5-2k ALM, FPU (F+D) ~3-4k ALM and
-  ~10-20 DSP, caches 2 x 16 KB data + tags = ~40 M10K, branch history 1024 x 54 bits = ~6 M10K.
+- Expected size: CPU core ~1.5-2k ALM, FPU (F+D) ~3-4k ALM and ~10-20 DSP, branch history 1024 x 54 bits
+  = ~6 M10K. Caches (M10K = 1 KB of data each, tags extra): 16 KB + 16 KB = 32 data + 4 tag blocks;
+  **64 KB + 32 KB = 96 data + 6 tag blocks** (I$ data 2 x 8192 x 32, tags 2 x 1024 x 19; D$ data 16 x
+  2048 x 8, tags 2 x 512 x 20), i.e. about +66 M10K over the 16 KB build.
 - The FPU and the 2-way cache hit logic are the likely critical paths at 57.75 MHz on the C8 device. If timing
   fails, first try `clk_sys` 51.975 MHz (`core_top.v`: `SYS_FREQ_STR`/`SYS_FREQ_HZ`), then
   `CACHE_WAYS=1` with 16 KB direct-mapped caches.
