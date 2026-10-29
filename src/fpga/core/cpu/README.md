@@ -25,7 +25,7 @@ a single core without the SMP/MMU logic, and native cache buses instead of LiteX
 | Reset vector | `0x00000000` (boot RAM); `mtvec` reset value `0x20` (firmware sets it) |
 | CSRs | `mcycle`/`minstret` (+ user `cycle`/`instret` read-only), `mtvec`, `mepc`, `mcause`, `mtval`, `mscratch`, `mie`/`mip`, `misa` |
 | Interrupts | `timerInterrupt`, `externalInterrupt`, `softwareInterrupt` pins |
-| D$ invalidate | custom instruction `0x0000500F` (`dcache_invalidate()` in `firmware/common/soc.h`) |
+| D$ invalidate | custom instruction `0x0000500F` (`dcache_invalidate()` in `firmware/common/soc.h`); one cycle per set (512). Put a `nop` in front of it: the flusher starts from the execute stage, also on the wrong path of a mispredicted branch |
 
 Bus protocols (native VexRiscv cache buses, adapted in `soc/ufo50_soc.v`):
 - `iBus_cmd` (valid/ready, address, size = log2 bytes; 5 = one 32-byte line) -> `iBus_rsp` beats of 32 bits.

@@ -9,6 +9,52 @@ and shows the M3 exit test on screen. The memory map and peripheral contract is
 The steps below assume Windows. Linux works the same way. Use `python3` instead
 of `py`, and `/media/...` instead of `E:\`.
 
+## Bigger CPU caches (branch `ufo50-cache`)
+
+`ufo50-cache` = `ufo50-blit2` plus a CPU with **64 KB I$ and 32 KB D$** (both still 2-way, 32-byte lines;
+was 16 KB + 16 KB) and one firmware fix, nothing else: same registers, data slots, clocks
+(57.75 MHz, `SDRAM_2X = 0`) and file list (no `.qsf` change). In the simulator (ufo50-ap `rv32sim --soc`,
+VexRiscv cache model) the game runtime needs 12-32% fewer CPU cycles per frame (Fist Hell -23%,
+Grimstone -20%, Vainger -20%, Golfaria -19%, Onion Delivery -18%, Kick Club -15%, Barbuta -15%,
+the library -32%). In Verilator the cache benchmark (`sim/cachebench`) runs its interpreter-like mix in
+43% fewer cycles.
+
+What changed:
+- `src/fpga/core/cpu/VexRiscv.v`: regenerated (`cpu/README.md`); only RAM depths and tag/address widths
+  differ from the 16 KB file. `soc/ufo50_soc.v`: `SYS_CONFIG` takes the sizes from four localparams.
+- `firmware/common/soc.h`: `dcache_invalidate()` has a `nop` in front. VexRiscv starts its D$ flush when
+  the instruction reaches the execute stage, before an older branch has resolved, so an invalidate right
+  behind a mispredicted branch emptied the whole D$ for nothing (256 cycles, 512 with the new D$). The
+  hello SDRAM march did that once per loop iteration (simulation: 0.1 s -> 0.2 s on the test screen with
+  the bigger D$); with the nop it shows 0.0 s. On the Pocket the full 63.5 MB march gets much faster too. The boot firmware `.hex` files are rebuilt with it.
+
+Build, package and copy exactly as for `ufo50-blit2` (`git checkout ufo50-cache`). Check in the compile report:
+- **Resources**: **RAM blocks about 161 -> 227 of 308** (+66 M10K: I$ data 2 x 8192 x 32 = 64 blocks,
+  was 16; I$ tags 2 x 1024 x 19 = 4, was 2; D$ data 16 x 2048 x 8 = 32, was 16; D$ tags 2 x 512 x 20 = 2);
+  block memory bits +562 Kbit (1.12 M -> ~1.68 M of 3.15 M). ALMs about the same (+0-300). If Quartus reports
+  noticeably more M10K than ~230, send the **RAM Summary** lines for `cpu|...|banks_*`, `ways_*_tags` and
+  `ways_*_data_symbol*` (it may have picked a wider mode with an output mux).
+- **Timing** (57.75 MHz clock `mp2|...|general[0]`, was +2.168 ns): two paths get a bigger fanout and
+  should be watched in **Report Top Failing Paths** / the worst 10 paths of that clock:
+  1. D$ address: the execute-stage adder `execute_SRC_ADD` -> the address registers of
+     `dataCache_1|ways_*_data_symbol*` and `ways_*_tags` (now 34 M10K, was 18). This is the classic
+     VexRiscv critical path; expect it to lose a few tenths of a ns.
+  2. I$ address: `IBusCachedPlugin` prefetch PC (`io_cpu_prefetch_pc`) -> `banks_0/1` (now 64 M10K in
+     8192 x 1 mode, was 16) and the tag RAMs.
+  The way-select / hit logic is unchanged (still 2 ways, the tag compares are 1-2 bits narrower).
+  Positive slack = fine. If it fails, send the first lines of the failing paths; the fallbacks are, in
+  order, I$ 32 KB (`ICACHE_KB=32`, 32 data M10K, keeps about 3/4 of the gain) or D$ 16 KB
+  (`DCACHE_KB=16`), regenerated as in `cpu/README.md` with the localparams in `ufo50_soc.v` changed to match.
+
+On the Pocket:
+- The M4 test screen (no `ufo50rt.bin` on the card) must say `I$ 64K 2-way  D$ 32K 2-way  FPU F+D` and
+  PASS everywhere as before; the `SDRAM ... march PASS` time should be much shorter than with the old
+  build (please note both numbers).
+- Games: everything should look exactly the same and run faster wherever the CPU was the limit
+  (Fist Hell, Golfaria, Vainger, Grimstone, Onion Delivery, Kick Club, the library). The blitter-bound
+  games (Valbrace, Hyper Contender, Overbold, Avianos) do not change much.
+- If anything is wrong, flash the `ufo50-blit2` bitstream again; nothing else on the SD card changes.
+
 ## Blitter throughput (branch `ufo50-blit2`)
 
 `ufo50-blit2` = `ufo50-m5` (with saves) plus a faster blitter, nothing else: same registers, commands, data slots,
