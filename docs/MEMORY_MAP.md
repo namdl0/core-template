@@ -341,6 +341,12 @@ I$ invalidate: `fence.i`. The FPU must be enabled before use (`mstatus.FS`, done
 
 ## Changelog
 
+- v0.10 (2026-10-30, branch `ufo50-wcbuf`, experimental): **write-combining store buffer** for CPU stores to
+  SDRAM (two 32-byte lines). Stores are posted; the order the CPU sees is unchanged (refills of a buffered line,
+  uncached reads, MMIO and boot RAM wait for it). For other masters: CPU data is in SDRAM when the CPU's next
+  MMIO access completes (as before, MMIO waits for the buffer), not immediately after the store; a master that
+  polls SDRAM written by the CPU without an MMIO handshake can see it up to ~32 cycles + one burst later.
+  `PC_DWRITE_N` counts accepted stores (merged or not).
 - v0.9 (2026-10-30, branch `ufo50-perfctr`): memory performance counters (section 3.1a, sysregs `0x200`-`0x254`)
   and blitter-burst preemption in the arbiter/1x controller (section 5). Measured in Verilator (`sim/membench`,
   a real Vainger frame replayed by the blitter while the CPU runs an interpreter-like mix): D$ refill

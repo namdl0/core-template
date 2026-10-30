@@ -261,7 +261,8 @@ end endgenerate
     wire [3:0]  ib_n    = ib_line ? 4'd7 : 4'd0;
 
     // SDRAM port 4
-    assign p_valid[4]          = (ib_state == IB_SD) && !ib_issued;
+    wire        ib_hold;            // the line is in the store buffer: wait until it is written (dBus fabric)
+    assign p_valid[4]          = (ib_state == IB_SD) && !ib_issued && !ib_hold;
     assign p_we[4]             = 1'b0;
     assign p_addr[4*24 +: 24]  = ib_word[25:2];
     assign p_len[4*6 +: 6]     = {3'b000, ib_left[2:0]};
@@ -330,7 +331,7 @@ end
 
     reg         dBus_wr_q;      // write flag of the latched command
     always @(posedge clk_sys)
-        if (db_state == DB_IDLE && dBus_cmd_valid) dBus_wr_q <= dBus_cmd_payload_wr;
+        if (db_state == DB_IDLE && dBus_cmd_valid && dBus_cmd_ready) dBus_wr_q <= dBus_cmd_payload_wr;
 
     reg         d_rsp_v;
     reg  [63:0] d_rsp_d;
@@ -339,21 +340,110 @@ end
     assign dBus_rsp_payload_data  = d_rsp_d;
     assign dBus_rsp_payload_last  = d_rsp_last;
     assign dBus_rsp_payload_error = 1'b0;
-    assign dBus_cmd_ready         = (db_state == DB_IDLE);
-
+    // Write-combining store buffer (branch ufo50-wcbuf): two 32-byte lines, F (filling) and D (being written).
+    // SDRAM stores (0x1xxx_xxxx and the uncached alias 0x5xxx_xxxx) are accepted at once into F; stores to F's
+    // line merge (byte masks). F is handed to D (and written to SDRAM as one burst from its first to its last
+    // written word; unwritten words have strobe 0) when a store to another line comes, when any other dBus
+    // command comes (line refill, uncached read, MMIO, boot RAM: these wait until both lines are written, so
+    // every access after a store sees it and an MMIO write that starts the blitter / a data-slot write-back
+    // follows the data), when the I$ refills that line, or WC_AGE cycles after the last store into F.
+    // A store to another line waits only while D is still being written.
     wire [3:0]  d_reg  = dBus_cmd_payload_address[31:28];
+    localparam [5:0] WC_AGE = 6'd32;
+    reg         wc_valid;                   // F holds data
+    reg  [25:5] wc_line;
+    reg  [31:0] wc_data [0:7];
+    reg  [3:0]  wc_mask [0:7];
+    reg  [5:0]  wc_age;
+    reg         wc_drain, wc_issued;        // D is being written / its command accepted
+    reg  [25:5] wd_line;
+    reg  [31:0] wd_data [0:7];
+    reg  [3:0]  wd_mask [0:7];
+    reg  [2:0]  wc_first, wc_beat, wc_len;
+    wire        d_sdw     = dBus_cmd_payload_wr && ((d_reg == 4'h1) || (d_reg == 4'h5));
+    wire        d_same    = wc_valid && (wc_line == dBus_cmd_payload_address[25:5]);
+    // a cached line refill from SDRAM only waits when its line is in F or D; everything else that is not
+    // a store (uncached reads, MMIO, boot RAM) waits until both are written
+    wire        d_lread   = (dBus_cmd_payload_size == 3'd5) && !dBus_cmd_payload_wr && (d_reg == 4'h1);
+    wire        d_conf    = (wc_valid && wc_line == dBus_cmd_payload_address[25:5])
+                            || (wc_drain && wd_line == dBus_cmd_payload_address[25:5]);
+    assign dBus_cmd_ready         = (db_state == DB_IDLE) && (d_sdw   ? (!wc_valid || d_same || !wc_drain)
+                                                            : d_lread ? !d_conf
+                                                                      : (!wc_valid && !wc_drain));
+    wire        wc_take  = dBus_cmd_valid && dBus_cmd_ready && d_sdw;
+    assign ib_hold = (wc_valid && (wc_line == ib_word[25:5])) || (wc_drain && (wd_line == ib_word[25:5]));
+    // first / last written word of F
+    reg  [2:0]  wc_lo, wc_hi;
+    integer     wk;
+    always @(*) begin
+        wc_lo = 3'd0; wc_hi = 3'd0;
+        for (wk = 7; wk >= 0; wk = wk - 1) if (|wc_mask[wk]) wc_lo = wk[2:0];
+        for (wk = 0; wk <= 7; wk = wk + 1) if (|wc_mask[wk]) wc_hi = wk[2:0];
+    end
+    // hand F to D: a store to another line (accepted in the same cycle into the emptied F), another dBus
+    // command waiting, the I$ wanting F's line, or F idle for WC_AGE cycles
+    wire        wc_hand  = wc_valid && !wc_drain && ((wc_take && !d_same) || (dBus_cmd_valid && !d_sdw && !dBus_cmd_ready)
+                                                     || (wc_line == ib_word[25:5] && ib_state == IB_SD)
+                                                     || (!wc_take && wc_age == WC_AGE));
+    wire [2:0]  wc_w     = wc_first + wc_beat;
+    wire [2:0]  wc_slot  = {dBus_cmd_payload_address[4:3], 1'b0};
+    integer     wj;
+always @(posedge clk_sys) begin
+    if (rst_sys) begin
+        wc_valid <= 1'b0; wc_drain <= 1'b0; wc_issued <= 1'b0; wc_age <= 6'd0;
+        for (wj = 0; wj < 8; wj = wj + 1) wc_mask[wj] <= 4'd0;
+    end else begin
+        if (wc_hand) begin
+            wd_line   <= wc_line;
+            for (wj = 0; wj < 8; wj = wj + 1) begin wd_data[wj] <= wc_data[wj]; wd_mask[wj] <= wc_mask[wj]; end
+            wc_drain  <= 1'b1;
+            wc_issued <= 1'b0;
+            wc_first  <= wc_lo;
+            wc_len    <= wc_hi - wc_lo;
+            wc_beat   <= 3'd0;
+        end
+        if (wc_take) begin
+            wc_valid <= 1'b1;
+            wc_line  <= dBus_cmd_payload_address[25:5];
+            wc_age   <= 6'd0;
+            for (wj = 0; wj < 8; wj = wj + 1)
+                if (wc_hand && wj[2:1] != wc_slot[2:1]) wc_mask[wj] <= 4'd0;   // F restarts with this store only
+            for (wj = 0; wj < 4; wj = wj + 1) begin
+                if (dBus_cmd_payload_mask[wj])     wc_data[wc_slot][8*wj +: 8]        <= dBus_cmd_payload_data[8*wj +: 8];
+                if (dBus_cmd_payload_mask[4 + wj]) wc_data[wc_slot + 3'd1][8*wj +: 8] <= dBus_cmd_payload_data[32 + 8*wj +: 8];
+            end
+            wc_mask[wc_slot]        <= (wc_hand ? 4'd0 : wc_mask[wc_slot])        | dBus_cmd_payload_mask[3:0];
+            wc_mask[wc_slot + 3'd1] <= (wc_hand ? 4'd0 : wc_mask[wc_slot + 3'd1]) | dBus_cmd_payload_mask[7:4];
+        end else if (wc_hand) begin
+            wc_valid <= 1'b0;
+            for (wj = 0; wj < 8; wj = wj + 1) wc_mask[wj] <= 4'd0;
+        end else if (wc_valid && wc_age != WC_AGE)
+            wc_age <= wc_age + 6'd1;
+        if (wc_drain && !wc_hand) begin
+            if (p_ready[3] && p3_wr) wc_issued <= 1'b1;
+            if (p_wready[3]) begin
+                wc_beat <= wc_beat + 3'd1;
+                if (wc_beat == wc_len) wc_drain <= 1'b0;
+            end
+        end
+    end
+end
+
     wire        d_line = (dBus_cmd_payload_size == 3'd5) && !dBus_cmd_payload_wr;
 
-    // SDRAM port 3
+    // SDRAM port 3: the store buffer's bursts, else the D$ refills / uncached reads
     wire        db_wlo = |db_mask[3:0];
     wire        db_whi = |db_mask[7:4];
-    assign p_valid[3]          = ((db_state == DB_SD_R) || (db_state == DB_SD_W)) && !db_issued;
-    assign p_we[3]             = (db_state == DB_SD_W);
-    assign p_addr[3*24 +: 24]  = (db_state == DB_SD_W) ? {db_addr[25:3], (db_wlo ? 1'b0 : 1'b1)}
+    // a waiting refill goes before a store burst that has not been accepted yet (the CPU is stalled on it)
+    wire        p3_rd  = (db_state == DB_SD_R) && !db_issued && !(wc_drain && wc_issued);
+    wire        p3_wr  = wc_drain && !wc_issued && !p3_rd;
+    assign p_valid[3]          = p3_rd || p3_wr;
+    assign p_we[3]             = p3_wr;
+    assign p_addr[3*24 +: 24]  = p3_wr ? {wd_line, wc_first}
                                        : db_line ? {db_addr[25:5], 3'b000} : {db_addr[25:3], 1'b0};
-    assign p_len[3*6 +: 6]     = (db_state == DB_SD_W) ? {5'b00000, db_wlo & db_whi} : {3'b000, db_issue[2:0]};
-    assign p_wdata[3*32 +: 32] = (db_wbeat || !db_wlo) ? db_data[63:32] : db_data[31:0];
-    assign p_wstrb[3*4 +: 4]   = (db_wbeat || !db_wlo) ? db_mask[7:4]   : db_mask[3:0];
+    assign p_len[3*6 +: 6]     = p3_wr ? {3'b000, wc_len} : {3'b000, db_issue[2:0]};
+    assign p_wdata[3*32 +: 32] = wd_data[wc_w];
+    assign p_wstrb[3*4 +: 4]   = wd_mask[wc_w];
 
     // MMIO master (Wishbone classic, 32-bit)
     reg         m_cyc;
@@ -391,7 +481,7 @@ always @(posedge clk_sys) begin
         end
 
         case (db_state)
-        DB_IDLE: if (dBus_cmd_valid) begin
+        DB_IDLE: if (dBus_cmd_valid && dBus_cmd_ready) begin
             db_addr   <= dBus_cmd_payload_address;
             db_data   <= dBus_cmd_payload_data;
             db_mask   <= dBus_cmd_payload_mask;
@@ -405,7 +495,7 @@ always @(posedge clk_sys) begin
                                 : {dBus_cmd_payload_address[14:3], 1'b0};
             casez (d_reg)
             4'h0: db_state <= dBus_cmd_payload_wr ? DB_BR_W : DB_BR_R;
-            4'h1, 4'h5: db_state <= dBus_cmd_payload_wr ? DB_SD_W : DB_SD_R;
+            4'h1, 4'h5: db_state <= dBus_cmd_payload_wr ? DB_IDLE : DB_SD_R;   // stores go to the buffer
             4'b1???: begin
                 db_state <= DB_IO;
                 m_cyc    <= 1'b1;
@@ -449,7 +539,7 @@ always @(posedge clk_sys) begin
         end
 
         DB_SD_R: begin
-            if (p_ready[3]) db_issued <= 1'b1;
+            if (p_ready[3] && p3_rd) db_issued <= 1'b1;
         end
 
         DB_SD_W: begin

@@ -9,6 +9,26 @@ and shows the M3 exit test on screen. The memory map and peripheral contract is
 The steps below assume Windows. Linux works the same way. Use `python3` instead
 of `py`, and `/media/...` instead of `E:\`.
 
+## Write-combining store buffer (branch `ufo50-wcbuf`, experimental)
+
+`ufo50-wcbuf` = `ufo50-preempt` plus a store buffer in the CPU's dBus fabric (`soc/ufo50_soc.v`). The D$ is
+write-through, so before this every CPU store was its own SDRAM write and the next dBus command waited for it
+(~9-11 cycles per store, much more while the blitter or scanout held the SDRAM). Now stores are accepted at once
+into a 32-byte line buffer, stores to the same line merge, and a full line goes out as one burst while the next
+line fills (two lines: one filling, one being written). A D$ refill waits only if its own line is in the buffer;
+uncached reads, MMIO and boot RAM accesses wait until both lines are written (so a blitter / data-slot / mixer
+command written over MMIO always follows the data it uses), and an I$ refill of a buffered line waits too.
+
+Verilator (`sim/membench`): store-heavy sequential code 48k -> 16k cycles (idle bus) and 38k -> 26k (blitter
+running); stall per store in the interpreter-like mix 9.1 -> 6.9 / 13.6 -> 8.4 cycles, but that mix as a whole only
+gains 0.5-1.4% (its stores are scattered over 8 lines and its time is in D$ misses). The rv32sim model of the
+same buffer predicts 25-35% less CPU time on real game frames together with ufo50-preempt, but it overestimated
+the buffer on membench, so treat that as an upper bound until the overlay's page 2 is read on the Pocket.
+All Verilator regressions pass (hello 1x/2x incl. save write-back, boot6, cachebench, real-frame blitter bench
+bit-exact). Resources: ~600 flip-flops (two 8 x 32-bit lines + masks) and their muxes; timing to watch: the
+dBus `cmd_ready` now depends on the line compare (`dBus_cmd_payload_address` vs the buffered lines).
+Only build this after ufo50-perfctr / ufo50-preempt have been measured on the Pocket.
+
 ## Blitter-burst preemption (branch `ufo50-preempt`)
 
 `ufo50-preempt` = `ufo50-perfctr` plus one SDRAM arbiter change: the blitter's long bursts (up to 64 beats,
