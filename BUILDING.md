@@ -9,6 +9,29 @@ and shows the M3 exit test on screen. The memory map and peripheral contract is
 The steps below assume Windows. Linux works the same way. Use `python3` instead
 of `py`, and `/media/...` instead of `E:\`.
 
+## Memory performance counters (branch `ufo50-perfctr`)
+
+`ufo50-perfctr` = `ufo50-cache` plus read-only **memory performance counters** in the system registers
+(`0x200`-`0x254`, `docs/MEMORY_MAP.md` 3.1a): I$ and D$ SDRAM refills and their cycles, CPU stores to SDRAM and the
+cycles they stalled the CPU, uncached/MMIO cycles, CPU arbiter wait, and SDRAM busy cycles per master. They only
+observe; the CPU, caches, arbiter and controller are unchanged. Purpose: the Pocket's perf overlay showed the CPU
+2-3x slower than the simulator predicted while the blitter matched; these counters show on the device where the
+CPU's time goes (ufo50-ap branch `perf-counters`: overlay page 2).
+
+Build, package and copy exactly as for `ufo50-cache`. Expect about +500-700 ALMs (16 x 32-bit counters and a read
+mux), no M10K change; timing should stay close to `ufo50-cache`'s (+1.498 ns).
+
+On the Pocket, with the `perf-counters` `ufo50rt.bin`: L+R shows the overlay, then **tap L alone** for page 2:
+`IC <refills/frame> <avg cycles>C DC ...`, `ST <stores/frame> <stall per store>C IO ...`,
+`MEM <stall cycles/frame> <% of time> BL<% SDRAM busy for the blitter> VI<% for the scanout>`, and
+`I64K D32K 57.75MHZ` (from `SYS_CONFIG`: confirms which core is loaded). Photos of page 1 and page 2 on the same
+screens as before (library, Barbuta, Golfaria/Grimstone text) are what is needed. With an older core, page 2 says
+`NO MEM COUNTERS IN THIS CORE`.
+
+Simulation: `sim/membench` (build with `sh sim/membench/build.sh`) runs from SDRAM like the game and measures the
+CPU with only the scanout and then while the blitter replays a real captured frame (`+preload=` files of
+`tools/blitbench.py`, as `firmware/bench`); `tb_soc.cpp` prints latency histograms per test (`MEMHIST`).
+
 ## Bigger CPU caches (branch `ufo50-cache`)
 
 `ufo50-cache` = `ufo50-blit2` plus a CPU with **64 KB I$ and 32 KB D$** (both still 2-way, 32-byte lines;
