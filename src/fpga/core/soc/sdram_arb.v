@@ -88,7 +88,12 @@ module sdram_arb #(
     assign c_wdata = p_wdata[m*32 +: 32];
     assign c_wstrb = p_wstrb[m*4 +: 4];
     assign p_rdata = c_rdata;
-    assign c_stop  = PREEMPT && busy && (owner == N-1) && (|p_valid[N-2:0]);
+    // `others_q`: another port waited in the previous cycle. Registered so the controller's cut logic (which drives
+    // the A10 bit of the SDRAM command) starts from flops only; a cut needs >= MIN_BEATS beats anyway, so the
+    // one-cycle delay costs nothing, and a stale 1 can only end a burst early (harmless), never corrupt one.
+    reg others_q;
+    always @(posedge clk) others_q <= |p_valid[N-2:0];
+    assign c_stop  = PREEMPT && busy && (owner == N-1) && others_q;
 
     genvar g;
     generate for (g = 0; g < N; g = g + 1) begin : gp
