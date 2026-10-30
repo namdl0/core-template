@@ -54,7 +54,8 @@ module vl_top (
     output wire         dbg_dline,     // D$ line refill command accepted
     output wire         dbg_drsp_last, // last beat of a D$ response
     output wire         dbg_iline,
-    output wire         dbg_irsp
+    output wire         dbg_irsp,
+    output wire [15:0]  dbg_mem        // CPU memory events for the latency histograms (tb_soc.cpp)
 );
     reg rst_sys = 1'b1;
     always @(posedge clk_sys) rst_sys <= rst_mem | ~reset_n;
@@ -151,5 +152,9 @@ module vl_top (
     assign dbg_drsp_last = soc.dBus_rsp_valid & soc.dBus_rsp_payload_last;
     assign dbg_iline     = soc.iBus_cmd_valid & soc.iBus_cmd_ready;
     assign dbg_irsp      = soc.iBus_rsp_valid;
+    assign dbg_mem = { soc.c_valid & soc.c_ready, soc.arb_owner, soc.arb_busy,
+                       soc.p_ready[4], soc.p_valid[4], soc.p_ready[3], soc.p_valid[3],
+                       soc.dBus_cmd_valid & soc.dBus_cmd_payload_wr, soc.dBus_rsp_valid & soc.dBus_rsp_payload_last,
+                       soc.dBus_cmd_ready, soc.pc_d_line, soc.p_rvalid[4], soc.ib_state == 2'd2, soc.pc_i_go };
 endmodule
 `default_nettype wire

@@ -163,6 +163,57 @@ struct Sdram {
     }
 };
 
+// ------------------------------------------------------------------ CPU memory latency histograms
+// (sim/membench: BENCH 7f id starts a measurement, BENCH 7e id prints it). dbg_mem bits (vl_top.v):
+// 0 I$ SDRAM refill accepted, 1 iBus fabric in IB_SD, 2 port-4 rvalid, 3 D$ line read valid, 4 dBus cmd
+// ready, 5 last D$ rsp beat, 6 dBus store valid, 7/8 port-3 valid/ready, 9/10 port-4 valid/ready,
+// 11 arbiter busy, 14:12 its owner, 15 controller accepts a command.
+struct Hist {
+    static const int NB = 12;
+    long n = 0, sum = 0, mx = 0, b[NB] = {};
+    void add(long v) { n++; sum += v; if (v > mx) mx = v; int k = 0; while (k < NB - 1 && v >= (8L << k)) k++; b[k]++; }
+    void print(const char *name) const {
+        printf("  %-22s n %7ld avg %7.1f max %5ld |", name, n, n ? (double)sum / n : 0.0, mx);
+        for (int k = 0; k < NB; k++) printf(" %ld", b[k]);
+        printf("\n");
+    }
+};
+struct MemHist {
+    Hist irefill, drefill, dstore, arbwait;
+    long block[8] = {};
+    Hist acc[6]; long acc_t0 = -1; int acc_own = 0;   // SDRAM access durations (arbiter busy) per owner            // CPU-port waiting cycles by the arbiter owner in the way (7 = controller, no owner)
+    long i_t0 = -1, d_t0 = -1, s_t0 = -1, a3 = -1, a4 = -1;
+    bool on = false;
+    void reset() { *this = MemHist(); on = true; }
+    void cycle(long c, uint32_t m) {
+        if (!on) return;
+        if (m & 1) i_t0 = c;
+        if (i_t0 >= 0 && c > i_t0 && !(m & 2)) { irefill.add(c - i_t0); i_t0 = -1; }
+        if ((m & 8) && d_t0 < 0) d_t0 = c;
+        if (d_t0 >= 0 && (m & 32)) { drefill.add(c - d_t0); d_t0 = -1; }
+        if ((m & 64) && s_t0 < 0) s_t0 = c;
+        if (s_t0 >= 0 && (m & 64) && (m & 16)) { dstore.add(c - s_t0); s_t0 = -1; }
+        bool v3 = m & 128, r3 = m & 256, v4 = m & 512, r4 = m & 1024;
+        if (v3 && a3 < 0) a3 = c;
+        if (a3 >= 0 && r3) { arbwait.add(c - a3); a3 = -1; }
+        if (v4 && a4 < 0) a4 = c;
+        if (a4 >= 0 && r4) { arbwait.add(c - a4); a4 = -1; }
+        bool busy = m & 2048;
+        if (busy && acc_t0 < 0) { acc_t0 = c; acc_own = (m >> 12) & 7; }
+        if (!busy && acc_t0 >= 0) { if (acc_own < 6) acc[acc_own].add(c - acc_t0); acc_t0 = -1; }
+        if ((v3 && !r3) || (v4 && !r4)) block[(m & 2048) ? (m >> 12) & 7 : 7]++;
+    }
+    void print(uint32_t id) const {
+        printf("MEMHIST %02x (bins: <8 <16 <32 <64 <128 <256 <512 <1k <2k <4k <8k >=8k cycles)\n", id);
+        irefill.print("I$ refill (cmd->8th)"); drefill.print("D$ refill (valid->last)");
+        dstore.print("store (valid->accept)"); arbwait.print("CPU port grant wait");
+        printf("  CPU waiting cycles by owner in the way: video %ld bridge %ld mixer %ld dBus %ld iBus %ld blitter %ld none %ld\n",
+               block[0], block[1], block[2], block[3], block[4], block[5], block[7]);
+        static const char *on[6] = {"access: video", "access: bridge", "access: mixer", "access: dBus", "access: iBus", "access: blitter"};
+        for (int k = 0; k < 6; k++) if (acc[k].n) acc[k].print(on[k]);
+    }
+};
+
 // ------------------------------------------------------------------ main
 int main(int argc, char **argv) {
     Verilated::commandArgs(argc, argv);
@@ -258,6 +309,7 @@ int main(int argc, char **argv) {
     long d_start = 0, d_lat = 0, d_n = 0, i_start = 0, i_lat = 0, i_n = 0;
     int i_beats = 0;
     bool d_open = false, i_open = false;
+    MemHist mh;
 
     while (!done && t < max_ms * 1e9) {
         t = std::min(std::min(n_sys, n_mem), std::min(n_vid, n_74));
@@ -290,6 +342,7 @@ int main(int argc, char **argv) {
                 if (d_open && top->dbg_drsp_last) { d_lat += sys_cycles - d_start; d_n++; d_open = false; }
                 if (top->dbg_iline) { i_start = sys_cycles; i_beats = 0; i_open = true; }
                 if (i_open && top->dbg_irsp && ++i_beats == 8) { i_lat += sys_cycles - i_start; i_n++; i_open = false; }
+                mh.cycle(sys_cycles, top->dbg_mem);
                 if (top->dbg_wr) {
                     marker = top->dbg_val;
                     if ((marker >> 16) == 0xDEAD) {
@@ -304,6 +357,8 @@ int main(int argc, char **argv) {
                         uint32_t tg = (marker >> 16) & 0xFF, v = marker & 0xFFFF;
                         printf("[%.3f ms] BENCH %02x %u\n", t / 1e9, tg, v);
                         if (tg == 0x01) bench_bad = v;
+                        if (tg == 0x7F) mh.reset();
+                        if (tg == 0x7E) { mh.print(v); mh.on = false; }
                         if (tg == 0xFF) done = true;
                     }
                     else printf("[%.3f ms] firmware step %u\n", t / 1e9, marker);

@@ -35,7 +35,11 @@ module sdram_arb #(
     output wire [3:0]        c_wstrb,
     input  wire              c_wready,
     input  wire [31:0]       c_rdata,
-    input  wire              c_rvalid
+    input  wire              c_rvalid,
+
+    // status (performance counters in ufo50_soc)
+    output wire              busy_o,      // an access is in progress
+    output wire [2:0]        owner_o      // its port
 );
 
     reg         busy;
@@ -58,6 +62,8 @@ module sdram_arb #(
     end
 
     wire [2:0] m = busy ? owner : sel;
+    assign busy_o  = busy;
+    assign owner_o = owner;
 
     assign c_valid = any && !busy;
     assign c_we    = p_we[sel];

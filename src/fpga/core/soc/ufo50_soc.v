@@ -156,6 +156,8 @@ VexRiscv cpu (
     wire [5:0]  c_len;
     wire [31:0] c_wdata, c_rdata;
     wire [3:0]  c_wstrb;
+    wire        arb_busy;
+    wire [2:0]  arb_owner;
 
 sdram_arb #( .N(NP) ) arb (
     .clk(clk_sys), .rst(rst_mem),
@@ -163,7 +165,8 @@ sdram_arb #( .N(NP) ) arb (
     .p_wdata(p_wdata), .p_wstrb(p_wstrb), .p_ready(p_ready), .p_wready(p_wready),
     .p_rvalid(p_rvalid), .p_rdata(p_rdata),
     .c_valid(c_valid), .c_ready(c_ready), .c_we(c_we), .c_addr(c_addr), .c_len(c_len),
-    .c_wdata(c_wdata), .c_wstrb(c_wstrb), .c_wready(c_wready), .c_rdata(c_rdata), .c_rvalid(c_rvalid)
+    .c_wdata(c_wdata), .c_wstrb(c_wstrb), .c_wready(c_wready), .c_rdata(c_rdata), .c_rvalid(c_rvalid),
+    .busy_o(arb_busy), .owner_o(arb_owner)
 );
 
 generate if (SDRAM_2X) begin : g_sd2x
@@ -636,10 +639,69 @@ always @(posedge clk_sys) begin
                 12'h110: sys_dat_r <= {29'd0, vid_fmt32, vid_mode == 2'd2, vid_mode == 2'd1};
                 12'h114: sys_dat_r <= {8'd0, vid_border};
                 12'h120: sys_dat_r <= {31'd0, sd_init_done};
+                // memory performance counters (MEMORY_MAP.md 3.1a)
+                12'h200: sys_dat_r <= pc_i_n;
+                12'h204: sys_dat_r <= pc_i_cyc;
+                12'h208: sys_dat_r <= pc_d_n;
+                12'h20C: sys_dat_r <= pc_d_cyc;
+                12'h210: sys_dat_r <= pc_w_n;
+                12'h214: sys_dat_r <= pc_w_stall;
+                12'h218: sys_dat_r <= pc_io_n;
+                12'h21C: sys_dat_r <= pc_io_cyc;
+                12'h220: sys_dat_r <= pc_arb_wait;
+                12'h224: sys_dat_r <= pc_d_wait;
+                12'h240: sys_dat_r <= pc_own[0];
+                12'h244: sys_dat_r <= pc_own[1];
+                12'h248: sys_dat_r <= pc_own[2];
+                12'h24C: sys_dat_r <= pc_own[3];
+                12'h250: sys_dat_r <= pc_own[4];
+                12'h254: sys_dat_r <= pc_own[5];
                 default: sys_dat_r <= 32'd0;
                 endcase
             end
         end
+    end
+end
+
+// ===========================================================================
+// Memory performance counters (sysregs 0x200-0x25C, read-only, free-running 32-bit, wrap)
+// docs/MEMORY_MAP.md 3.1a. Nothing here feeds back into the datapath.
+// ===========================================================================
+    reg [31:0] pc_i_n, pc_i_cyc, pc_d_n, pc_d_cyc, pc_w_n, pc_w_stall, pc_io_n, pc_io_cyc, pc_arb_wait, pc_d_wait;
+    reg [31:0] pc_own [0:5];
+    wire       pc_i_go   = iBus_cmd_valid && iBus_cmd_ready && (iBus_cmd_payload_address[31:28] == 4'h1);
+    wire       pc_d_sd   = (dBus_cmd_payload_address[31:28] == 4'h1) || (dBus_cmd_payload_address[31:28] == 4'h5);
+    wire       pc_d_line = dBus_cmd_valid && !dBus_cmd_payload_wr && (dBus_cmd_payload_size == 3'd5) && pc_d_sd;
+    wire       pc_d_io   = dBus_cmd_valid && !pc_d_line && !(dBus_cmd_payload_wr && pc_d_sd)
+                           && (dBus_cmd_payload_address[31:28] != 4'h0);
+    reg        pc_io_open;
+    integer    pk;
+always @(posedge clk_sys) begin
+    if (rst_sys) begin
+        pc_i_n <= 32'd0; pc_i_cyc <= 32'd0; pc_d_n <= 32'd0; pc_d_cyc <= 32'd0; pc_w_n <= 32'd0;
+        pc_w_stall <= 32'd0; pc_io_n <= 32'd0; pc_io_cyc <= 32'd0; pc_arb_wait <= 32'd0; pc_d_wait <= 32'd0;
+        pc_io_open <= 1'b0;
+        for (pk = 0; pk < 6; pk = pk + 1) pc_own[pk] <= 32'd0;
+    end else begin
+        // I$ line refill from SDRAM: the accept cycle + every cycle in IB_SD (until the 8th beat)
+        if (pc_i_go) pc_i_n <= pc_i_n + 32'd1;
+        if (pc_i_go || ib_state == IB_SD) pc_i_cyc <= pc_i_cyc + 32'd1;
+        // D$ line refill: from dBus cmd valid (incl. waiting for an earlier store) to the last beat
+        if (pc_d_line && dBus_cmd_ready) pc_d_n <= pc_d_n + 32'd1;
+        if (pc_d_line || (db_state == DB_SD_R && db_line)) pc_d_cyc <= pc_d_cyc + 32'd1;
+        // SDRAM stores: commands accepted, and cycles a store waited to be accepted (CPU stalled)
+        if (dBus_cmd_valid && dBus_cmd_payload_wr && pc_d_sd && dBus_cmd_ready) pc_w_n <= pc_w_n + 32'd1;
+        if (dBus_cmd_valid && dBus_cmd_payload_wr && !dBus_cmd_ready) pc_w_stall <= pc_w_stall + 32'd1;
+        // any dBus command waiting to be accepted (the fabric still busy with the previous one)
+        if (dBus_cmd_valid && !dBus_cmd_ready) pc_d_wait <= pc_d_wait + 32'd1;
+        // uncached reads (0x5xxx_xxxx) and MMIO accesses: valid -> response / done
+        if (pc_d_io && dBus_cmd_ready) begin pc_io_n <= pc_io_n + 32'd1; pc_io_open <= 1'b1; end
+        if (pc_d_io || pc_io_open) pc_io_cyc <= pc_io_cyc + 32'd1;
+        if (pc_io_open && db_state == DB_IDLE && !(pc_d_io && dBus_cmd_ready)) pc_io_open <= 1'b0;
+        // CPU ports waiting for an arbiter grant (another master or each other)
+        if ((p_valid[3] && !p_ready[3]) || (p_valid[4] && !p_ready[4])) pc_arb_wait <= pc_arb_wait + 32'd1;
+        // SDRAM busy cycles by owner (arbiter port: 0 video, 1 bridge, 2 mixer, 3 dBus, 4 iBus, 5 blitter)
+        if (arb_busy) pc_own[arb_owner] <= pc_own[arb_owner] + 32'd1;
     end
 end
 

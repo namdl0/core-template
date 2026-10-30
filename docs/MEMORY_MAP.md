@@ -129,6 +129,30 @@ selected lanes (sel). Undefined offsets read 0.
 | `0x120` | `SDRAM_STATUS` | R | bit 0 = SDRAM controller initialised |
 | `0xFFC` | `DEBUG_OUT` | W | ignored by the hardware; the firmware writes progress markers here, which the simulation testbenches (and SignalTap) watch |
 
+### 3.1a Memory performance counters (v0.9, branch `ufo50-perfctr`)
+
+Read-only, in the system register window, free-running 32-bit `clk_sys` counts from reset (they wrap after
+~74 s at 57.75 MHz: take differences over short windows). A core without them reads 0 there. They only
+observe the CPU's buses and the SDRAM arbiter (nothing feeds back into the datapath).
+
+| Offset | Name | Counts |
+|---|---|---|
+| `0x200` | `PC_IREFILL_N` | I$ line refills from SDRAM (iBus commands accepted with an SDRAM address) |
+| `0x204` | `PC_IREFILL_CYC` | cycles of those refills, from the accept cycle to the 8th beat (the CPU's fetch stall) |
+| `0x208` | `PC_DREFILL_N` | D$ line refills from SDRAM (line reads accepted) |
+| `0x20C` | `PC_DREFILL_CYC` | cycles from the line read being presented (`dBus_cmd_valid`, including waiting for an earlier store to finish) to its last beat |
+| `0x210` | `PC_DWRITE_N` | CPU stores to SDRAM accepted (the D$ is write-through: each store is one SDRAM write of 1-2 beats) |
+| `0x214` | `PC_DWRITE_STALL` | cycles a store waited to be accepted (`valid & !ready`: the CPU is stalled; the fabric takes the next dBus command only after the previous store's write beat) |
+| `0x218` | `PC_IO_N` | uncached reads (`0x5xxx_xxxx`) and MMIO accesses (reads and writes) |
+| `0x21C` | `PC_IO_CYC` | their cycles, presented -> response / done |
+| `0x220` | `PC_ARB_WAIT` | cycles in which a CPU SDRAM port (dBus 3 or iBus 4) has a request the arbiter has not granted (another master's access, or the controller busy/refreshing) |
+| `0x224` | `PC_DBUS_WAIT` | cycles any dBus command waited to be accepted |
+| `0x240`-`0x254` | `PC_OWNER[0..5]` | SDRAM busy cycles (arbiter access in progress) by port: 0 video, 1 bridge, 2 mixer, 3 dBus, 4 iBus, 5 blitter |
+
+CPU cycles stalled on memory over a window = `IREFILL_CYC + DREFILL_CYC + DWRITE_STALL + IO_CYC` (an upper
+bound: the I$ and D$ can overlap by a few cycles). The game runtime shows them on the perf overlay's second page
+(ufo50-ap `runtime/pocket/perf.c`); `tools/rv32sim --soc --bus 1` models the same registers.
+
 ### 3.2 Data-slot controller, base `0x8001_0000`
 
 Wraps APF target commands `0x0180` (data slot read), `0x0184` (data slot write) and `0x0188` (data slot
@@ -313,6 +337,9 @@ I$ invalidate: `fence.i`. The FPU must be enabled before use (`mstatus.FS`, done
 
 ## Changelog
 
+- v0.9 (2026-10-30, branch `ufo50-perfctr`): memory performance counters (section 3.1a, sysregs `0x200`-`0x254`)
+  only; no datapath change. Verilator: `sim/membench` (CPU latency under a real blitter frame + scanout) and
+  per-access latency histograms in `tb_soc.cpp`.
 - v0.1 (2026-10-25): first draft.
 - v0.8 (2026-10-28, branch `ufo50-cache`): **bigger CPU caches**, I$ 16 -> 64 KB, D$ 16 -> 32 KB (both still
   2-way, 32-byte lines). `SYS_CONFIG` reports 64 / 32. No register, port or memory-map change.
