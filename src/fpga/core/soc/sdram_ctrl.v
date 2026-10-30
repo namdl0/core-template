@@ -27,7 +27,8 @@
 
 module sdram_ctrl #(
     parameter INIT_CYCLES    = 16'd12000,   // >= 200 us at 57.75 MHz
-    parameter REFRESH_CYCLES = 10'd300
+    parameter REFRESH_CYCLES = 10'd300,
+    parameter MIN_BEATS      = 6'd4
 )(
     input  wire        clk,
     input  wire        rst,             // synchronous, active high (PLL not locked)
@@ -45,6 +46,15 @@ module sdram_ctrl #(
     output reg         rvalid,
     output wire        idle,            // no access in progress (for arbiter)
     output reg         init_done,
+
+    // burst preemption (ufo50-perfctr): while `stop` is high, a burst that has issued at least
+    // MIN_BEATS beats ends after the current beat (its command gets the auto-precharge). `cut` is
+    // combinational in that beat's command cycle (S_RD/S_WR phase 0), with the beats not done
+    // (`cut_rem`, >= 1) and the word address to continue at (`cut_addr`, same SDRAM row).
+    input  wire        stop,
+    output wire        cut,
+    output wire [5:0]  cut_rem,
+    output wire [25:2] cut_addr,
 
     // SDRAM pins (registered here; place in IO cells)
     output reg  [12:0] sd_a,
@@ -100,6 +110,13 @@ localparam [3:0] S_INIT = 4'd0, S_INIT_PRE = 4'd1, S_INIT_REF = 4'd2, S_INIT_MRS
     endtask
 
     wire [9:0] col = {a_addr[10:2], 1'b0};
+
+    reg  [5:0] done_beats;      // beats issued in this access before the current one
+    reg        last_q;          // the beat issued in phase 0 was the last
+    assign cut      = (state == S_RD || state == S_WR) && !phase && (a_left != 6'd0) && stop && (done_beats >= MIN_BEATS);
+    assign cut_rem  = a_left;
+    assign cut_addr = {a_addr[25:11], a_addr[10:2] + 9'd1};
+    wire       last_now = (a_left == 6'd0) || cut;
 
 always @(posedge clk) begin
     // defaults
@@ -191,6 +208,7 @@ always @(posedge clk) begin
                 a_we   <= cmd_we;
                 a_addr <= cmd_addr;
                 a_left <= cmd_len;
+                done_beats <= 6'd0;
                 sdcmd(C_ACT);
                 sd_ba  <= cmd_addr[12:11];
                 sd_a   <= cmd_addr[25:13];
@@ -207,12 +225,14 @@ always @(posedge clk) begin
             if (!phase) begin
                 sdcmd(C_RD);
                 sd_dqm   <= 2'b00;
-                sd_a     <= {2'b00, (a_left == 6'd0), col};
+                sd_a     <= {2'b00, last_now, col};
                 rd_pipe[0] <= 1'b1;
                 phase    <= 1'b1;
+                last_q   <= last_now;
+                done_beats <= done_beats + 6'd1;
             end else begin
                 phase <= 1'b0;
-                if (a_left == 6'd0) begin
+                if (last_q) begin
                     cnt   <= 16'd4;              // precharge + last data
                     state <= S_WAIT;
                 end else begin
@@ -226,7 +246,9 @@ always @(posedge clk) begin
             sd_dq_oe <= 1'b1;
             if (!phase) begin
                 sdcmd(C_WR);
-                sd_a      <= {2'b00, (a_left == 6'd0), col};
+                sd_a      <= {2'b00, last_now, col};
+                last_q    <= last_now;
+                done_beats <= done_beats + 6'd1;
                 sd_dq_out <= wdata[15:0];
                 sd_dqm    <= ~wstrb[1:0];
                 wr_hi     <= wdata[31:16];
@@ -236,7 +258,7 @@ always @(posedge clk) begin
                 sd_dq_out <= wr_hi;
                 sd_dqm    <= wr_dqm_hi;
                 phase     <= 1'b0;
-                if (a_left == 6'd0) begin
+                if (last_q) begin
                     cnt   <= 16'd4;              // tWR + tRP
                     state <= S_WAIT;
                 end else begin

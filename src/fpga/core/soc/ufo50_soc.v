@@ -157,16 +157,24 @@ VexRiscv cpu (
     wire [31:0] c_wdata, c_rdata;
     wire [3:0]  c_wstrb;
     wire        arb_busy;
+    wire        c_stop, c_cut;
+    wire [5:0]  c_cut_rem;
+    wire [25:2] c_cut_addr;
     wire [2:0]  arb_owner;
 
+`ifdef UFO50_NO_PREEMPT
+sdram_arb #( .N(NP), .PREEMPT(0) ) arb (      // simulation only: the arbiter without burst preemption
+`else
 sdram_arb #( .N(NP) ) arb (
+`endif
     .clk(clk_sys), .rst(rst_mem),
     .p_valid(p_valid), .p_we(p_we), .p_addr(p_addr), .p_len(p_len),
     .p_wdata(p_wdata), .p_wstrb(p_wstrb), .p_ready(p_ready), .p_wready(p_wready),
     .p_rvalid(p_rvalid), .p_rdata(p_rdata),
     .c_valid(c_valid), .c_ready(c_ready), .c_we(c_we), .c_addr(c_addr), .c_len(c_len),
     .c_wdata(c_wdata), .c_wstrb(c_wstrb), .c_wready(c_wready), .c_rdata(c_rdata), .c_rvalid(c_rvalid),
-    .busy_o(arb_busy), .owner_o(arb_owner)
+    .busy_o(arb_busy), .owner_o(arb_owner),
+    .c_stop(c_stop), .c_cut(c_cut), .c_cut_rem(c_cut_rem), .c_cut_addr(c_cut_addr)
 );
 
 generate if (SDRAM_2X) begin : g_sd2x
@@ -179,9 +187,11 @@ sdram_ctrl2x #( .INIT_CYCLES(SDRAM_INIT_CYCLES * 2) ) sdc (
     .sd_a(sd_a), .sd_ba(sd_ba), .sd_dqm(sd_dqm), .sd_cke(sd_cke), .sd_ras_n(sd_ras_n),
     .sd_cas_n(sd_cas_n), .sd_we_n(sd_we_n), .sd_dq_out(sd_dq_out), .sd_dq_oe(sd_dq_oe), .sd_dq_in(sd_dq_in)
 );
+    assign c_cut = 1'b0; assign c_cut_rem = 6'd0; assign c_cut_addr = 24'd0;   // 2x controller: no burst preemption
 end else begin : g_sd1x
 sdram_ctrl #( .INIT_CYCLES(SDRAM_INIT_CYCLES) ) sdc (
     .clk(clk_sys), .rst(rst_mem),
+    .stop(c_stop), .cut(c_cut), .cut_rem(c_cut_rem), .cut_addr(c_cut_addr),
     .cmd_valid(c_valid), .cmd_ready(c_ready), .cmd_we(c_we), .cmd_addr(c_addr), .cmd_len(c_len),
     .wdata(c_wdata), .wstrb(c_wstrb), .wready(c_wready), .rdata(c_rdata), .rvalid(c_rvalid),
     .idle(c_idle), .init_done(sd_init_done),

@@ -9,6 +9,35 @@ and shows the M3 exit test on screen. The memory map and peripheral contract is
 The steps below assume Windows. Linux works the same way. Use `python3` instead
 of `py`, and `/media/...` instead of `E:\`.
 
+## Blitter-burst preemption (branch `ufo50-preempt`)
+
+`ufo50-preempt` = `ufo50-perfctr` plus one SDRAM arbiter change: the blitter's long bursts (up to 64 beats,
+~135 cycles) **yield** when any other master (CPU, scanout, mixer, bridge) is waiting. The 1x controller ends the
+burst after the current beat once it has moved 4 beats (auto-precharge, so the SDRAM timing is that of a normal
+shorter access) and the arbiter issues the rest later; the blitter sees the same port protocol (one accept, all its
+beats in order, with a gap). Why: the CPU's I$/D$ refills and stores could each wait a whole blitter burst. With the
+counters (ufo50-perfctr) and Verilator (`sim/membench`, a real Vainger frame replayed by the blitter while the CPU
+runs an interpreter-like mix with the scanout on):
+
+| while the blitter runs | ufo50-perfctr | ufo50-preempt |
+|---|---|---|
+| D$ refill, avg cycles (miss loop) | 145 | 46 |
+| I$ refill, avg cycles (code loop) | 124 | 38 |
+| store stall per store (mix) | 31.7 | 13.6 |
+| interpreter-like mix, total cycles | 1.70M | 1.17M (-31%) |
+| real Vainger frame, blitter alone, cycles | 1,186,829 | 1,189,584 (+0.2%), bit-exact |
+
+Nothing changes while the blitter is idle. When the CPU misses continuously the blitter gets less of the SDRAM
+(55% -> 45% of the time in the mix above), so blitter-bound scenes can lose a little while the CPU is busy.
+
+Build, package and copy exactly as for `ufo50-cache`. Expect a few dozen ALMs more than ufo50-perfctr. **Timing to
+watch**: the new combinational path is arbiter `busy/owner` + the CPU ports' `p_valid` -> controller `stop` ->
+`cut` -> the A10 bit of the SDRAM command (`sd_a`) and the arbiter's `left`/`pend_*` registers; if it shows up in the
+worst paths of `clk_sys`, send them. The SDRAM pin timing is unchanged (same registered outputs). On the Pocket:
+everything must look exactly as before (watch for wrong pixels in sprites/backgrounds: a broken continuation would
+put blitter data at the wrong address), and the overlay's page 2 should show much lower `IC`/`DC` refill cycles in
+scenes with a busy blitter. If anything looks wrong, flash ufo50-perfctr again.
+
 ## Memory performance counters (branch `ufo50-perfctr`)
 
 `ufo50-perfctr` = `ufo50-cache` plus read-only **memory performance counters** in the system registers

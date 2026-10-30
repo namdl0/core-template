@@ -267,7 +267,11 @@ Protocol:
   cycles (~70% of the bus rate), 32 beats ~71 (~90%), 64 beats ~135 (~95%).
 - Worst-case wait for a high-priority port is one access in progress: up to ~140 cycles (a 64-beat scanout burst).
 - Arbitration (fixed priority, may be tuned; not part of the contract): video scanout > bridge (APF) >
-  `X1` mixer > CPU D-bus > CPU I-bus > `X0` blitter. `mem_rdata` is shared by all ports: it is only
+  `X1` mixer > CPU D-bus > CPU I-bus > `X0` blitter. Since v0.9 (`ufo50-perfctr`, 1x controller) an `X0` access
+  is **preempted**: when any other port is waiting and the access has moved at least 4 beats, the controller ends
+  it after the current beat (auto-precharge) and the arbiter issues the rest later as a continuation. The master
+  sees no protocol change: one `ready`, then all its beats in order, possibly with a gap (masters must not assume
+  `rvalid` / `wready` beats are contiguous). `mem_rdata` is shared by all ports: it is only
   meaningful in a cycle where your own `mem_rvalid` is high.
 - The CPU's D$ is not snooped. After the blitter writes memory the CPU will read (rare: the framebuffer is
   write-only for the CPU), the CPU invalidates its D$ or reads through `0x5xxx_xxxx`. A master must not assume a bound on `ready`
@@ -338,8 +342,10 @@ I$ invalidate: `fence.i`. The FPU must be enabled before use (`mstatus.FS`, done
 ## Changelog
 
 - v0.9 (2026-10-30, branch `ufo50-perfctr`): memory performance counters (section 3.1a, sysregs `0x200`-`0x254`)
-  only; no datapath change. Verilator: `sim/membench` (CPU latency under a real blitter frame + scanout) and
-  per-access latency histograms in `tb_soc.cpp`.
+  and blitter-burst preemption in the arbiter/1x controller (section 5). Measured in Verilator (`sim/membench`,
+  a real Vainger frame replayed by the blitter while the CPU runs an interpreter-like mix): D$ refill
+  145 -> 46 cycles, I$ refill 124 -> 38, the CPU work 1.70M -> 1.17M cycles; nothing changes while the blitter
+  is idle.
 - v0.1 (2026-10-25): first draft.
 - v0.8 (2026-10-28, branch `ufo50-cache`): **bigger CPU caches**, I$ 16 -> 64 KB, D$ 16 -> 32 KB (both still
   2-way, 32-byte lines). `SYS_CONFIG` reports 64 / 32. No register, port or memory-map change.
